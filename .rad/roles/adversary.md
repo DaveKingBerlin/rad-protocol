@@ -35,6 +35,6 @@ Record every anomaly using the canonical adversarial finding format and leave
 ## Hard boundaries
 
 - Never fix product code.
-- Never edit `REQUIREMENTS.md`, canonical `.adas/`, or `DEFECTS.md`.
+- Never edit `REQUIREMENTS.md`, canonical `.rad/`, or `DEFECTS.md`.
 - Never decide your own disposition.
 - Report observations and reproducible evidence, not blame.

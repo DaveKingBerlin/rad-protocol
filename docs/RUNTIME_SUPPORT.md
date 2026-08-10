@@ -1,15 +1,15 @@
-# ADAS 3 Runtime Support
+# RAD Protocol 3 Runtime Support
 
-ADAS 3 separates the canonical delivery protocol from runtime mechanics.
+RAD 3 separates the canonical delivery protocol from runtime mechanics.
 
-| Runtime | Project instructions | Native custom agents | ADAS adapter |
+| Runtime | Project instructions | Native custom agents | RAD adapter |
 |---|---|---|---|
 | OpenAI Codex | `AGENTS.md` | `.codex/agents/*.toml` | `.codex/` |
 | OpenCode | `AGENTS.md` | `.opencode/agents/*.md` | `.opencode/` |
 | Claude Code | `CLAUDE.md` (imports `AGENTS.md`) | `.claude/agents/*.md` | `.claude/` + `CLAUDE.md` |
 | Cursor | `AGENTS.md` / Rules | `.cursor/agents/*.md` | `.cursor/` |
 
-## Normalized ADAS behavior
+## Normalized RAD behavior
 
 All runtimes must preserve:
 

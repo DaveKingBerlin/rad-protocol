@@ -1,6 +1,6 @@
-# Contributing to ADAS
+# Contributing to RAD Protocol
 
-Thanks for helping improve the Autonomous Development Automation System.
+Thanks for helping improve the Runtime-Agnostic Delivery Protocol.
 
 ## Good contribution areas
 
@@ -28,7 +28,7 @@ Open an issue describing:
 
 Please keep changes focused and explain:
 
-- which ADAS principle is affected
+- which RAD principle is affected
 - whether existing project templates must migrate
 - whether Codex-version behavior is involved
 - evidence from a real or synthetic run

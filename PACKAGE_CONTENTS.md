@@ -1,18 +1,18 @@
-# ADAS 3.0.0-alpha.3 Package Contents
+# RAD Protocol 3.0.0-alpha.3 Package Contents
 
 `LICENSE` is intentionally not included in this upgrade package; keep the
 repository's existing GPL-3.0 license.
 
 ## Canonical source of truth
 
-- `.adas/manifest.json`
-- `.adas/core/`
-- `.adas/roles/`
-- `.adas/workflows/`
-- `.adas/policies/`
-- `.adas/schema/`
+- `.rad/manifest.json`
+- `.rad/core/`
+- `.rad/roles/`
+- `.rad/workflows/`
+- `.rad/policies/`
+- `.rad/schema/`
 
-## Generator and lifecycle tooling
+## Generator and harness
 
 - `tools/generate_adapters.py`
 - `scripts/generate-adapters.ps1`
@@ -38,15 +38,13 @@ repository's existing GPL-3.0 license.
 
 ## CI guard
 
-- `.github/workflows/adapter-drift.yml` — fails when generated adapters drift from `.adas/`.
+- `.github/workflows/adapter-drift.yml` — fails when generated adapters drift
+  from `.rad/`.
 
 ## Public examples
 
 - `examples/snake/`
 - `examples/paddle-duel/`
 - `examples/blockfall/`
-- `examples/blockfall/RESULT_CODEX.md`
-- `examples/blockfall/RESULT_OPENCODE.md`
 - `docs/BLOCKFALL_RUNTIME_MATRIX_TEST.md`
 - `docs/PUBLIC_EXAMPLE_NAMING.md`
-- `docs/RENAMING_ADHS_TO_ADAS.md`

@@ -1,4 +1,4 @@
-# ADAS generated/runtime artifacts
+# RAD generated/runtime artifacts
 e2e/artifacts/
 screenshots/generated/
 coverage/
@@ -39,4 +39,4 @@ logs/
 Thumbs.db
 .vscode/
 .idea/
-.adas-local/
+.rad-local/

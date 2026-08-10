@@ -12,7 +12,7 @@ sensitive PoC data in public issues.
 
 ## Autonomous-agent safety
 
-ADAS projects should:
+RAD projects should:
 
 - keep secrets outside project artifacts
 - gitignore `.env` and generated browser profiles

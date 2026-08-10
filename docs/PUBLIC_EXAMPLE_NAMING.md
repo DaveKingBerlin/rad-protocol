@@ -1,6 +1,6 @@
 # Public Example Naming
 
-ADAS public examples use neutral descriptive project names:
+RAD public examples use neutral descriptive project names:
 
 - **Snake** — deterministic grid-movement benchmark
 - **Paddle Duel** — local two-player paddle-and-ball benchmark

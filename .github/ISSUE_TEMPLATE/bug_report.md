@@ -1,12 +1,12 @@
 ---
 name: Bug report
-about: Report a problem in the ADAS framework/template
+about: Report a problem in the RAD framework/template
 title: "[Bug] "
 labels: bug
 assignees: ""
 ---
 
-## ADAS version
+## RAD version
 
 ## Codex version / platform
 

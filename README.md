@@ -1,13 +1,15 @@
-# ADAS — Autonomous Development Automation System
+# RAD Protocol
 
-**ADAS 3** is a runtime-agnostic, contract-first multi-agent software-delivery
-protocol. The project was called ADHS in earlier prerelease versions and was
-renamed to ADAS in **3.0.0-alpha.3**.
+**RAD — Runtime-Agnostic Delivery** is a contract-first, runtime-independent
+software-delivery protocol for autonomous coding agents.
 
-> One delivery system. Multiple coding-agent runtimes.
+> **One delivery protocol. Any agent runtime.**
+>
+> *Don't reinvent the wheel. Run RAD.*
 
-The canonical workflow lives in **`.adas/`**. Codex, OpenCode, Claude Code and
-Cursor integrations are thin generated adapters.
+The canonical workflow lives in **`.rad/`**. Codex, OpenCode, Claude Code and
+Cursor integrations are thin generated adapters around the same roles, workflows
+and policies.
 
 ## Architecture
 
@@ -15,7 +17,7 @@ Cursor integrations are thin generated adapters.
                          REQUIREMENTS.md
                                │
                                ▼
-                         .adas/ CORE
+                          .rad/ CORE
                  canonical roles/workflows/policies
                                │
                     adapter generator
@@ -33,12 +35,15 @@ Cursor integrations are thin generated adapters.
                      Validated software
 ```
 
+The runtime changes. The delivery protocol does not.
+
 ## Canonical core
 
 ```text
-.adas/
+.rad/
 ├── manifest.json
-├── core/protocol.md
+├── core/
+│   └── protocol.md
 ├── roles/
 │   ├── orchestrator.md
 │   ├── frontend-dev.md
@@ -62,8 +67,12 @@ Cursor integrations are thin generated adapters.
 │   ├── git-checkpoints.md
 │   ├── process-lifecycle.md
 │   └── public-naming.md
-└── schema/manifest.schema.json
+└── schema/
+    └── manifest.schema.json
 ```
+
+Runtime adapter files contain only runtime mechanics and pointers back to these
+canonical instructions.
 
 ## Generate adapters
 
@@ -74,34 +83,54 @@ python .\tools\generate_adapters.py --all
 python .\tools\generate_adapters.py --check --all
 ```
 
-Or:
+Or on PowerShell:
 
 ```powershell
 .\scripts\generate-adapters.ps1
 .\scripts\generate-adapters.ps1 -Check
 ```
 
-Change `.adas/`, regenerate, review the diff, commit. The included GitHub Actions
+Change `.rad/`, regenerate, review the diff, commit. The included GitHub Actions
 drift check rejects commits where generated adapters no longer match the
 canonical core.
 
 ## Runtime adapters
 
-- **Codex:** `AGENTS.md`, `.codex/config.toml`, `.codex/agents/*.toml`
-- **OpenCode:** generated primary orchestrator + `.opencode/agents/*.md`; alpha.3
-  allows routine local validation commands while retaining approval for broader
-  shell/network-sensitive activity
-- **Claude Code:** generated `CLAUDE.md` + `.claude/agents/*.md`
-- **Cursor:** `.cursor/agents/*.md` + `/adas-*` convenience command files
+### OpenAI Codex
 
-See `docs/RUNTIME_SUPPORT.md`.
+- shared project bootstrap: `AGENTS.md`
+- custom delegated agents: `.codex/agents/*.toml`
+- runtime config: `.codex/config.toml`
+- main Codex thread acts as orchestrator
+
+### OpenCode
+
+- shared project bootstrap: `AGENTS.md`
+- generated primary orchestrator + delegated agents: `.opencode/agents/*.md`
+- OpenCode permissions can strengthen canonical role ownership while allowing
+  routine local validation commands
+
+### Claude Code
+
+- generated `CLAUDE.md` imports shared `AGENTS.md`
+- delegated agents: `.claude/agents/*.md`
+- main Claude session acts as orchestrator
+
+### Cursor
+
+- shared `AGENTS.md`
+- delegated agents: `.cursor/agents/*.md`
+- convenience commands: `.cursor/commands/rad-*.md`
+- main Cursor Agent acts as orchestrator
+
+See [`docs/RUNTIME_SUPPORT.md`](docs/RUNTIME_SUPPORT.md).
 
 ## Core workflow
 
 ```text
 Requirements
     ↓
-Strict read-only Runtime/Harness Preflight
+Runtime/Harness Preflight
     ↓
 Architecture Audit + Complexity Budget
     ↓
@@ -115,7 +144,7 @@ Adversarial Review
     ↓
 Formal Defect Loop
     ↓
-Cumulative Regression + Evidence + Naming Gate
+Cumulative Regression + Evidence Gate
     ↓
 Git Checkpoint
     ↓
@@ -127,56 +156,50 @@ Next Phase / Final Release
 1. Put product requirements in `REQUIREMENTS.md`.
 2. Generate/check adapters.
 3. Start your chosen runtime.
-4. Ask: **“Run ADAS preflight.”**
-5. Ask: **“Run ADAS architecture audit.”**
+4. Ask: **“Run RAD preflight.”**
+5. Ask: **“Run RAD architecture audit.”**
 6. Resolve only genuine A-class blockers.
-7. Ask: **“Start ADAS implementation and continue through all approved phases.”**
-8. If interrupted: **“Resume ADAS.”**
+7. Ask: **“Start RAD implementation and continue through all approved phases.”**
+8. If interrupted: **“Resume RAD.”**
 
-Cursor users also get `/adas-preflight`, `/adas-audit`, `/adas-build`,
-`/adas-resume` and `/adas-release` generated as command files.
+Cursor users also get `/rad-preflight`, `/rad-audit`, `/rad-build`,
+`/rad-resume` and `/rad-release` generated as commands.
 
 ## Examples and benchmarks
 
-The repository includes Snake, Paddle Duel and Blockfall requirements. Historical
-Snake/Paddle Duel and the first two Blockfall runtime-matrix passes occurred under
-the former ADHS prerelease name and remain documented as historical results.
+The repository includes example requirements for Snake, Paddle Duel and
+Blockfall. Snake and Paddle Duel validated the legacy ADHS 2.x process. Blockfall
+is the first verified runtime-matrix benchmark for the runtime-independent 3.x
+architecture.
 
-Blockfall runtime matrix so far:
+The same Blockfall contract completed successfully under both:
 
-- Codex / GPT-5.6 Sol: **PASSED**
-- OpenCode 1.18.15 / DeepSeek V4 Flash Latest: **PASSED**
-- Claude Code: pending
-- Cursor: pending
+- Codex / GPT-5.6 Sol
+- OpenCode 1.18.15 / DeepSeek V4 Flash Latest via OpenRouter
 
-See `examples/`, `BENCHMARKS.md`, and `docs/BLOCKFALL_RUNTIME_MATRIX_TEST.md`.
-
-## What changed in alpha.3
-
-- renamed ADHS → **ADAS — Autonomous Development Automation System**
-- renamed canonical folder `.adhs/` → `.adas/`
-- made canonical adapter hashing CRLF/LF-stable
-- strengthened preflight so it reports repairs but never performs them
-- fixed stale test-process metadata cleanup for `owned_pids` / `root_pid`
-- added explicit public naming compliance to the final release gate
-- reduced routine OpenCode validation permission friction
-- added the completed OpenCode/DeepSeek Blockfall runtime-matrix result and timing/cost metrics
-
-See `CHANGELOG.md` and `docs/RENAMING_ADHS_TO_ADAS.md`.
+See `examples/`, `BENCHMARKS.md` and
+`docs/BLOCKFALL_RUNTIME_MATRIX_TEST.md`.
 
 ## Status
 
-**3.0.0-alpha.3** — runtime-agnostic prerelease with two successful Blockfall
-runtime-matrix implementations (Codex and OpenCode). Claude Code and Cursor remain
-to be validated before a stable 3.0.0 release.
+**3.0.0-alpha.3** — first release under the **RAD Protocol** name.
+
+Alpha.3 includes the OpenCode cross-runtime validation, CRLF/LF-stable adapter
+hashing, corrected Windows test-process cleanup, strictly read-only preflight
+behavior, public naming compliance, and generated RAD adapters for Codex,
+OpenCode, Claude Code and Cursor.
+
+Codex and OpenCode have passed the Blockfall runtime matrix. Claude Code and
+Cursor remain validation targets before a stable 3.0.0 release.
 
 ## License
 
-ADAS is intended for the repository's existing **GPL-3.0** license. This upgrade
-ZIP intentionally does not replace the repository's existing `LICENSE` file.
+RAD Protocol is intended for the repository's existing **GPL-3.0** license. This
+upgrade package intentionally does not replace the repository's existing
+`LICENSE` file.
 
 ---
 
-**ADAS — Autonomous Development Automation System**
+**RAD Protocol — Runtime-Agnostic Delivery Protocol**
 
 *From requirements to validated software — autonomously, across runtimes.*

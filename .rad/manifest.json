@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "rad_version": "3.0.0-alpha.3",
+  "product_contract": "REQUIREMENTS.md",
+  "core_protocol": ".rad/core/protocol.md",
+  "orchestrator_role": ".rad/roles/orchestrator.md",
+  "roles": {
+    "frontend-dev": {
+      "path": ".rad/roles/frontend-dev.md",
+      "delegated": true
+    },
+    "backend-dev": {
+      "path": ".rad/roles/backend-dev.md",
+      "delegated": true
+    },
+    "qa": {
+      "path": ".rad/roles/qa.md",
+      "delegated": true
+    },
+    "adversary": {
+      "path": ".rad/roles/adversary.md",
+      "delegated": true
+    }
+  },
+  "workflows": {
+    "preflight": ".rad/workflows/preflight.md",
+    "architecture_audit": ".rad/workflows/architecture-audit.md",
+    "implementation": ".rad/workflows/implementation.md",
+    "phase_gate": ".rad/workflows/phase-gate.md",
+    "resume": ".rad/workflows/resume.md",
+    "final_release": ".rad/workflows/final-release.md"
+  },
+  "policies": [
+    ".rad/policies/role-ownership.md",
+    ".rad/policies/defect-lifecycle.md",
+    ".rad/policies/adversarial-review.md",
+    ".rad/policies/evidence.md",
+    ".rad/policies/deterministic-testing.md",
+    ".rad/policies/external-cost-safety.md",
+    ".rad/policies/git-checkpoints.md",
+    ".rad/policies/process-lifecycle.md",
+    ".rad/policies/public-naming.md"
+  ],
+  "generated_adapters": [
+    "codex",
+    "opencode",
+    "claude",
+    "cursor"
+  ]
+}

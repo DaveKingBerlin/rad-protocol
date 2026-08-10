@@ -7,7 +7,7 @@ $ErrorActionPreference = "Continue"
 
 $metaPath = "e2e/artifacts/processes/test-app-$Port.json"
 if (-not (Test-Path $metaPath)) {
-    Write-Host "No ADAS process metadata found for port $Port. Refusing to kill an unknown process."
+    Write-Host "No RAD process metadata found for port $Port. Refusing to kill an unknown process."
     exit 1
 }
 
@@ -43,4 +43,4 @@ if ($listener) {
 }
 
 Remove-Item $metaPath -Force -ErrorAction SilentlyContinue
-Write-Host "Stopped recorded ADAS process tree; port $Port is free."
+Write-Host "Stopped recorded RAD process tree; port $Port is free."

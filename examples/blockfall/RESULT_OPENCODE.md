@@ -1,7 +1,7 @@
 # Blockfall — OpenCode Runtime-Matrix Benchmark Result
 
 This benchmark was executed on the 3.0.0-alpha.2 runtime-agnostic core before the
-framework rename from **ADHS** to **ADAS** in alpha.3. It used the generated
+framework rename from **ADHS** to **RAD Protocol** in alpha.3. It used the generated
 OpenCode primary orchestrator and delegated agents.
 
 ## Result
@@ -53,7 +53,7 @@ test titles, evidence and built output finished with zero unexpected prohibited
 name occurrences. The audit instruction itself was the documented declaration
 exception.
 
-This finding motivated the canonical ADAS public-naming policy added in alpha.3.
+This finding motivated the canonical RAD Protocol public-naming policy added in alpha.3.
 
 ## Runtime-neutrality evidence
 

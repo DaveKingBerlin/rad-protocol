@@ -25,7 +25,7 @@ assigned by the orchestrator.
 
 ## Hard boundaries
 
-- Do not edit `REQUIREMENTS.md` or canonical `.adas/` governance.
+- Do not edit `REQUIREMENTS.md` or canonical `.rad/` governance.
 - Do not edit `DEFECTS.md` or `ADVERSARIAL_REVIEW.md`.
 - Do not alter QA-owned E2E tests to hide product failures.
 - Never claim a defect is CLOSED.

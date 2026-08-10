@@ -45,6 +45,6 @@ When relevant, test early:
 ## Hard boundaries
 
 - Never fix product source.
-- Never edit `REQUIREMENTS.md`, canonical `.adas/`, or `ADVERSARIAL_REVIEW.md`.
+- Never edit `REQUIREMENTS.md`, canonical `.rad/`, or `ADVERSARIAL_REVIEW.md`.
 - Never weaken E2E tests to hide a product failure.
 - Only QA may set a defect CLOSED.

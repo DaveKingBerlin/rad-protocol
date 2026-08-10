@@ -1,9 +1,9 @@
-# ADAS Proof-of-Concept Report
+# RAD Proof-of-Concept Report
 
 ## Run metadata
 
 - Project:
-- ADAS version: 3.0.0-alpha.3
+- RAD Protocol version: 3.0.0-alpha.3
 - Codex version:
 - Model:
 - Platform:
@@ -11,6 +11,11 @@
 - End:
 - Total elapsed:
 - Human interventions:
+- Permission interruptions:
+- Provider cost:
+- Cost type (actual / estimated API-equivalent / unavailable):
+- Orchestrator active time (if exposed):
+- Summed provider generation time (if available):
 
 ## Token usage
 
@@ -130,7 +135,7 @@ user may append exact `/status` values after the run.
 
 ### What should be retained
 
-### What should change in the next ADAS version
+### What should change in the next RAD Protocol version
 
 ## Final result
 

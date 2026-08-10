@@ -1,10 +1,10 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "ADAS manifest",
+  "title": "RAD manifest",
   "type": "object",
   "required": [
     "schema_version",
-    "adas_version",
+    "rad_version",
     "product_contract",
     "core_protocol",
     "orchestrator_role",
@@ -17,7 +17,7 @@
       "type": "integer",
       "minimum": 1
     },
-    "adas_version": {
+    "rad_version": {
       "type": "string"
     },
     "product_contract": {

@@ -1,6 +1,6 @@
 ## Summary
 
-## ADAS principle / workflow affected
+## RAD principle / workflow affected
 
 ## Why this change?
 

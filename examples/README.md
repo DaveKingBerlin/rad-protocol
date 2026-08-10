@@ -1,7 +1,7 @@
-# ADAS Example Requirements
+# RAD Protocol Example Requirements
 
 These examples demonstrate how a product-specific `REQUIREMENTS.md` can be
-structured and let users run ADAS on small self-contained projects.
+structured and let users run RAD on small self-contained projects.
 
 | Example | Complexity | Focus | Verified |
 |---|---|---|---|
@@ -31,9 +31,9 @@ python .\tools\generate_adapters.py --check --all
 
 Ask the runtime to:
 
-1. `Run the ADAS preflight.`
-2. `Run the ADAS architecture audit.`
-3. `Start the ADAS implementation and continue through all approved phases.`
+1. `Run the RAD preflight.`
+2. `Run the RAD architecture audit.`
+3. `Start the RAD implementation and continue through all approved phases.`
 
 A good requirements file makes vision, non-goals, stable IDs, observable
 behavior, domain invariants, edge cases, NFRs, testing, acceptance scenarios and

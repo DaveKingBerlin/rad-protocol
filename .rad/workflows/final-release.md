@@ -18,7 +18,7 @@ At minimum where applicable:
 - criterion-by-criterion final evidence matrix
 - generated-adapter drift check
 - immutable product-contract check
-- public naming compliance audit under `.adas/policies/public-naming.md`
+- public naming compliance audit under `.rad/policies/public-naming.md`
 
 No blocking OPEN/FIX-READY/DISPUTED defect and no PENDING adversarial finding may
 remain at successful release.

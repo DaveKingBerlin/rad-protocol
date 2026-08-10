@@ -1,9 +1,9 @@
-name: ADAS adapter drift
+name: RAD adapter drift
 
 on:
   push:
     paths:
-      - '.adas/**'
+      - '.rad/**'
       - 'tools/generate_adapters.py'
       - '.codex/**'
       - '.opencode/**'
@@ -12,7 +12,7 @@ on:
       - 'CLAUDE.md'
   pull_request:
     paths:
-      - '.adas/**'
+      - '.rad/**'
       - 'tools/generate_adapters.py'
       - '.codex/**'
       - '.opencode/**'

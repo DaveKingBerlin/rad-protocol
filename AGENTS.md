@@ -1,40 +1,41 @@
-# ADAS 3 — Runtime-Agnostic Bootstrap
+# RAD Protocol 3 — Runtime-Agnostic Bootstrap
 
-This repository uses **ADAS — Autonomous Development Automation System**.
+This repository uses **RAD Protocol — Runtime-Agnostic Delivery Protocol**.
 
-`REQUIREMENTS.md` is the immutable product contract during an autonomous run.
+## Canonical instructions
 
-## Canonical instruction order
+Before autonomous delivery, read:
 
-1. `.adas/core/protocol.md`
-2. `.adas/roles/orchestrator.md` (main/parent agent)
-3. the relevant workflow under `.adas/workflows/`
-4. policies under `.adas/policies/` as they become relevant
+1. `.rad/core/protocol.md`
+2. `.rad/roles/orchestrator.md` (main/parent agent)
+3. the relevant workflow under `.rad/workflows/`
+4. policies under `.rad/policies/` as they become relevant
 
-Runtime folders such as `.codex/`, `.opencode/`, `.claude/` and `.cursor/` are
-generated adapters. They are **not** the source of ADAS behavior. If an adapter
-and `.adas/` disagree, `.adas/` wins.
+`REQUIREMENTS.md` is the immutable product contract during a build.
 
-## Role model
+## Runtime adapters
 
-- orchestrator: plans, delegates, triages and gates; does not implement product code
-- frontend-dev: frontend/client implementation and frontend unit tests
-- backend-dev: backend/domain/storage/provider implementation and domain tests
-- qa: independent E2E/product verification, evidence and defect closure
-- adversary: hostile edge-case/security/reliability review; never fixes findings
+`.codex/`, `.opencode/`, `.claude/`, `.cursor/` and `CLAUDE.md` are generated
+runtime adapters. They are **not** the source of RAD behavior.
 
-Only QA may mark defects CLOSED.
+If an adapter and `.rad/` disagree, `.rad/` wins.
 
-## Workflow phrases
+Do not hand-maintain generated adapters. Regenerate after canonical changes:
 
-- “Run ADAS preflight.” → `.adas/workflows/preflight.md`
-- “Run ADAS architecture audit.” → `.adas/workflows/architecture-audit.md`
-- “Start/continue ADAS build.” → `.adas/workflows/implementation.md`
-- “Resume ADAS.” → `.adas/workflows/resume.md`
-- “Run final ADAS release gate.” → `.adas/workflows/final-release.md`
+```text
+python tools/generate_adapters.py --all
+```
 
-Before autonomous product work, verify generated adapters with:
+Verify no drift with:
 
 ```text
 python tools/generate_adapters.py --check --all
 ```
+
+## Natural-language entry points
+
+- “Run RAD preflight.” -> `.rad/workflows/preflight.md`
+- “Run RAD architecture audit.” -> `.rad/workflows/architecture-audit.md`
+- “Start/continue RAD build.” -> `.rad/workflows/implementation.md`
+- “Resume RAD.” -> `.rad/workflows/resume.md`
+- “Run final RAD release gate.” -> `.rad/workflows/final-release.md`

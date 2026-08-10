@@ -1,4 +1,4 @@
-# ADAS 3 Blockfall Runtime-Matrix Test
+# RAD Protocol 3 Blockfall Runtime-Matrix Test
 
 Use `examples/blockfall/REQUIREMENTS.md` as a reproducible cross-runtime benchmark.
 
@@ -8,7 +8,7 @@ controlled time/randomness.
 
 ## Prepare a fresh project
 
-Copy the ADAS 3 template, then:
+Copy the RAD Protocol 3 template, then:
 
 ```text
 copy examples/blockfall/REQUIREMENTS.md REQUIREMENTS.md
@@ -21,8 +21,8 @@ Initialize a fresh Git baseline before product code.
 
 Run the same canonical sequence:
 
-1. ADAS preflight
-2. ADAS architecture audit
+1. RAD preflight
+2. RAD architecture audit
 3. resolve only A-class blocking decisions
 4. autonomous implementation
 5. final release gate
@@ -32,7 +32,7 @@ active time when exposed, provider request-generation time when available, human
 interventions, permission interruptions, test counts, defects, adversarial
 findings, token/usage data, cost/cost type and adapter-specific limitations.
 
-During the runtime matrix, keep the same canonical `.adas/` core and the same
+During the runtime matrix, keep the same canonical `.rad/` core and the same
 `REQUIREMENTS.md`. Runtime-specific manual adapter edits should be recorded as a
 benchmark failure or limitation, not silently folded into the core.
 
@@ -46,4 +46,4 @@ runtime-specific convenience features.
 - Claude Code: pending
 - Cursor: pending
 
-For alpha.3 and later runs, use `.adas/` as the canonical source of truth.
+For alpha.3 and later runs, use `.rad/` as the canonical source of truth.

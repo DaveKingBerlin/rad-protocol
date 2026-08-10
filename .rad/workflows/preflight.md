@@ -1,6 +1,6 @@
 # Workflow: Harness Preflight
 
-Perform a **strictly read-only** ADAS harness preflight. Do not implement product
+Perform a **strictly read-only** RAD harness preflight. Do not implement product
 functionality and do not repair the workspace during preflight.
 
 ## Read-only invariant
@@ -39,7 +39,7 @@ python tools/generate_adapters.py --check --all
 ```
 
 Generated adapter drift is a BLOCKER because adapters must correspond to the
-canonical `.adas/` core. **Do not regenerate adapters during preflight.** Report
+canonical `.rad/` core. **Do not regenerate adapters during preflight.** Report
 `python tools/generate_adapters.py --all` only as the proposed post-preflight
 repair command.
 
@@ -47,7 +47,7 @@ repair command.
 
 Classify each as `PASS`, `WARNING`, `BLOCKER`, `PHASE-1 DELIVERABLE`, or `NOT REQUIRED`:
 
-1. `.adas/manifest.json` and canonical files are readable.
+1. `.rad/manifest.json` and canonical files are readable.
 2. `REQUIREMENTS.md` exists and is treated as immutable.
 3. Git is initialized/usable enough for diffs/checkpoints.
 4. Current runtime sandbox/command execution works as configured.

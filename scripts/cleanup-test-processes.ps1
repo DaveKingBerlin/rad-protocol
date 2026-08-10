@@ -1,6 +1,6 @@
 param()
 $dir="e2e/artifacts/processes"
-if(-not(Test-Path $dir)){Write-Host "No ADAS process metadata.";exit 0}
+if(-not(Test-Path $dir)){Write-Host "No RAD process metadata.";exit 0}
 
 Get-ChildItem $dir -Filter "test-app-*.json" -File | ForEach-Object {
     try {
@@ -25,7 +25,7 @@ Get-ChildItem $dir -Filter "test-app-*.json" -File | ForEach-Object {
         })
 
         if ($alive.Count -gt 0) {
-            Write-Host "Recorded ADAS process PID(s) $($alive -join ', ') still exist; leaving metadata untouched."
+            Write-Host "Recorded RAD process PID(s) $($alive -join ', ') still exist; leaving metadata untouched."
         } else {
             Remove-Item $_.FullName -Force
             Write-Host "Removed stale metadata $($_.Name)"

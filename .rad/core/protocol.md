@@ -1,25 +1,25 @@
-# ADAS Core Protocol
+# RAD Core Protocol
 
-ADAS — Autonomous Development Automation System — is a runtime-independent
+RAD — Runtime-Agnostic Delivery Protocol — is a runtime-independent
 software-delivery protocol.
 
 ## Source of truth
 
-The canonical ADAS behavior lives under `.adas/`.
+The canonical RAD behavior lives under `.rad/`.
 
 Runtime folders such as `.codex/`, `.opencode/`, `.claude/` and `.cursor/` are
 **generated adapters only**. They may configure models, tools, permissions,
 subagent syntax, commands and runtime-specific mechanics, but they must never
-redefine the ADAS delivery process.
+redefine the RAD delivery process.
 
-If a generated adapter conflicts with `.adas/`, the `.adas/` definition wins.
+If a generated adapter conflicts with `.rad/`, the `.rad/` definition wins.
 
 `REQUIREMENTS.md` is the immutable product contract during an autonomous run.
 
 ## Main execution model
 
 The main/parent agent acts as **orchestrator** unless the selected runtime uses a
-native primary-agent abstraction. Read `.adas/roles/orchestrator.md` before
+native primary-agent abstraction. Read `.rad/roles/orchestrator.md` before
 starting autonomous delivery.
 
 Delegated roles:
@@ -29,7 +29,7 @@ Delegated roles:
 - `qa`
 - `adversary`
 
-Each role must read its canonical role file under `.adas/roles/` before work.
+Each role must read its canonical role file under `.rad/roles/` before work.
 
 ## Delivery invariants
 
@@ -48,7 +48,7 @@ Each role must read its canonical role file under `.adas/roles/` before work.
 
 ## Runtime capability negotiation
 
-Before implementation, run `.adas/workflows/preflight.md`.
+Before implementation, run `.rad/workflows/preflight.md`.
 
 The preflight must verify the **effective behavior of the current runtime session**,
 not merely configuration files or PATH resolution. Runtime-specific limitations
@@ -66,7 +66,7 @@ workflow safely, use the documented fallback and continue.
 ## Generated adapter rule
 
 Do not hand-edit generated runtime adapters as the normal maintenance path.
-Change the canonical `.adas/` core, then run:
+Change the canonical `.rad/` core, then run:
 
 ```text
 python tools/generate_adapters.py --all
