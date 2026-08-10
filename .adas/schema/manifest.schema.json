@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ADAS manifest",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "adas_version",
+    "product_contract",
+    "core_protocol",
+    "orchestrator_role",
+    "roles",
+    "workflows",
+    "policies"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "adas_version": {
+      "type": "string"
+    },
+    "product_contract": {
+      "type": "string"
+    },
+    "core_protocol": {
+      "type": "string"
+    },
+    "orchestrator_role": {
+      "type": "string"
+    },
+    "roles": {
+      "type": "object"
+    },
+    "workflows": {
+      "type": "object"
+    },
+    "policies": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "generated_adapters": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

@@ -1,0 +1,42 @@
+# ADAS generated/runtime artifacts
+e2e/artifacts/
+screenshots/generated/
+coverage/
+playwright-report/
+test-results/
+.nyc_output/
+
+# Dependencies/builds
+node_modules/
+dist/
+build/
+out/
+.cache/
+.tmp/
+temp/
+
+# Runtime state
+*.db-shm
+*.db-wal
+*.sqlite-shm
+*.sqlite-wal
+*.pid
+*.pid.json
+
+# Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Logs/editor/OS
+*.log
+logs/
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+.adas-local/

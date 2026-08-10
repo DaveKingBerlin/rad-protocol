@@ -1,0 +1,32 @@
+name: ADAS adapter drift
+
+on:
+  push:
+    paths:
+      - '.adas/**'
+      - 'tools/generate_adapters.py'
+      - '.codex/**'
+      - '.opencode/**'
+      - '.claude/**'
+      - '.cursor/**'
+      - 'CLAUDE.md'
+  pull_request:
+    paths:
+      - '.adas/**'
+      - 'tools/generate_adapters.py'
+      - '.codex/**'
+      - '.opencode/**'
+      - '.claude/**'
+      - '.cursor/**'
+      - 'CLAUDE.md'
+
+jobs:
+  check-adapters:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Verify generated adapters are in sync
+        run: python tools/generate_adapters.py --check --all
