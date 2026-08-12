@@ -182,15 +182,26 @@ See `examples/`, `BENCHMARKS.md` and
 
 ## Status
 
-**3.0.0-alpha.3** — first release under the **RAD Protocol** name.
+**3.0.0-beta.1** — first beta release of RAD Protocol.
 
-Alpha.3 includes the OpenCode cross-runtime validation, CRLF/LF-stable adapter
-hashing, corrected Windows test-process cleanup, strictly read-only preflight
-behavior, public naming compliance, and generated RAD adapters for Codex,
-OpenCode, Claude Code and Cursor.
+RAD has now completed multiple autonomous software-delivery benchmarks across different project types and runtime/model combinations.
 
-Codex and OpenCode have passed the Blockfall runtime matrix. Claude Code and
-Cursor remain validation targets before a stable 3.0.0 release.
+The canonical `.rad/` core, generated runtime adapters, formal QA/defect lifecycle, adversarial review, deterministic testing policies and final release gates have all been exercised successfully in repeated end-to-end runs.
+
+Current beta focus:
+
+- additional runtime-matrix validation
+- permission-profile refinement
+- runtime-specific friction reduction
+- broader project diversity
+- benchmark consistency
+- documentation and onboarding
+- stabilization toward `3.0.0`
+
+## Origins & Acknowledgements
+
+Inspired in part by Ed Donner’s public multi-agent development setup, especially the separation of orchestration, implementation, QA and adversarial review. RAD Protocol has since evolved into a runtime-agnostic delivery and governance protocol with generated adapters for multiple agent runtimes.
+
 
 ## License
 
