@@ -32,6 +32,12 @@ current-session sandbox/capability probe.
 
 ## Adapter integrity
 
+For an untrusted project, use the release-pinned installed launcher's `verify`
+command first. It compares against installed expectations without executing the
+project's generator. A project-local generator cannot establish its own trust.
+The command below is only a consistency check after the source is explicitly
+trusted, not a Secure Mode baseline or permission check.
+
 Run or conceptually verify the read-only check:
 
 ```text

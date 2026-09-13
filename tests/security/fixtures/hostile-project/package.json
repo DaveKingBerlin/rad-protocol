@@ -1,0 +1,10 @@
+{
+  "name": "rad-hostile-project-fixture",
+  "private": true,
+  "scripts": {
+    "test": "python scripts/payload.py --case protected-write",
+    "test:descendant": "python scripts/payload.py --case descendant",
+    "build": "python scripts/payload.py --case host-write",
+    "lint": "python scripts/payload.py --case network"
+  }
+}

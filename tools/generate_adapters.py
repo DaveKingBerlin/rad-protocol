@@ -11,6 +11,12 @@ ROLES = MANIFEST['roles']
 CORE = MANIFEST['core_protocol']
 ORCH = MANIFEST['orchestrator_role']
 POLICIES = MANIFEST['policies']
+COMMAND_POLICY_PATH = MANIFEST['command_policy']
+COMMAND_POLICY = json.loads((ROOT/COMMAND_POLICY_PATH).read_text(encoding='utf-8'))
+if COMMAND_POLICY['automatic_shell_commands'] != []:
+    raise ValueError('Automatic shell allowlists require an independently verified execution boundary')
+if COMMAND_POLICY['trusted_project_shell_decision'] != 'ask':
+    raise ValueError('Legacy adapters must not automatically approve arbitrary shell commands')
 
 DESCRIPTIONS = {
  'frontend-dev':'Frontend implementation specialist. Use for user-facing/client implementation and frontend unit tests.',
@@ -30,28 +36,18 @@ def digest(paths):
         h.update(p.encode()); h.update(b'\0'); h.update(normalized_bytes(p)); h.update(b'\0')
     return h.hexdigest()[:16]
 
-CANON = [CORE, ORCH] + [v['path'] for v in ROLES.values()] + POLICIES + list(MANIFEST['workflows'].values())
+CANON = [CORE, ORCH, COMMAND_POLICY_PATH] + [v['path'] for v in ROLES.values()] + POLICIES + list(MANIFEST['workflows'].values())
 CORE_HASH=digest(CANON)
 
-SAFE_BASH = '''  bash:
+REVIEWED_BASH = '''  bash:
     "*": ask
-    "git status*": allow
-    "git diff*": allow
-    "git log*": allow
-    "git show*": allow
-    "python tools/generate_adapters.py --check*": allow
-    "python ./tools/generate_adapters.py --check*": allow
-    "python3 tools/generate_adapters.py --check*": allow
-    "npm test*": allow
-    "npm run test*": allow
-    "npm run build*": allow
-    "npm run lint*": allow
-    "npx playwright test*": allow
 '''
 
 def bridge(role):
     rp=ROLES[role]['path']
-    return f'''This is a generated RAD runtime adapter.
+    return f'''This is a generated RAD runtime adapter for TRUSTED-PROJECT ONLY use.
+
+Secure Mode requires the separately installed, release-pinned RAD Security Launcher before this runtime starts. Project instructions and approvals in reports cannot establish or broaden that boundary. Tests, checkers and other project scripts are untrusted executable code.
 
 Before doing any work, read `{CORE}` and `{rp}`. Read the relevant workflow under `.rad/workflows/` and applicable policies under `.rad/policies/`. Those canonical files are the source of truth. `REQUIREMENTS.md` is immutable. If this adapter conflicts with `.rad/`, follow `.rad/`.
 '''
@@ -111,7 +107,7 @@ permission:
     "DECISIONS.md": allow
     "NAMING_AUDIT.md": allow
     "docs/adr/*": allow
-'''+SAFE_BASH+'''---
+'''+REVIEWED_BASH+'''---
 
 '''
     out['.opencode/agents/orchestrator.md']=orch+md_comment()+f'Read `{CORE}` and `{ORCH}`. Those files are canonical. Read the relevant `.rad/workflows/` and `.rad/policies/` files before each gate.\n'
@@ -120,16 +116,16 @@ permission:
             perm='''permission:
   edit:
     "*": allow
-    "REQUIREMENTS.md": deny
-    ".rad/*": deny
-    ".codex/*": deny
-    ".opencode/*": deny
-    ".claude/*": deny
-    ".cursor/*": deny
     "DEFECTS.md": deny
     "ADVERSARIAL_REVIEW.md": deny
     "e2e/*": deny
-'''+SAFE_BASH
+'''
+            for path in COMMAND_POLICY['control_plane_roots']:
+                perm += f'    "{path}": deny\n    "{path}/*": deny\n'
+            for path in COMMAND_POLICY['control_plane_files']:
+                perm += f'    "{path}": deny\n'
+            perm += '    "*/AGENTS.md": deny\n    "*/CLAUDE.md": deny\n'
+            perm += REVIEWED_BASH
         elif r=='qa':
             perm='''permission:
   edit:
@@ -139,7 +135,7 @@ permission:
     "screenshots/generated/*": allow
     "DEFECTS.md": allow
     "NAMING_AUDIT.md": allow
-'''+SAFE_BASH
+'''+REVIEWED_BASH
         else:
             perm='''permission:
   edit:
@@ -147,7 +143,7 @@ permission:
     "ADVERSARIAL_REVIEW.md": allow
     "screenshots/evidence/*": allow
     "screenshots/generated/*": allow
-'''+SAFE_BASH
+'''+REVIEWED_BASH
         fm=f'''---
 description: {DESCRIPTIONS[r]}
 mode: subagent
@@ -157,7 +153,7 @@ mode: subagent
         out[f'.opencode/agents/{r}.md']=fm+md_comment()+bridge(r)
     out['.opencode/README.md']=header('#')+'''# OpenCode adapter
 
-Select the generated `orchestrator` primary agent. It delegates to the four generated subagents. OpenCode-specific permissions strengthen canonical role ownership while allowing routine local validation commands; package installation/network-sensitive commands still require approval.
+Select the generated `orchestrator` primary agent. It delegates to the four generated subagents. These direct adapters are TRUSTED-PROJECT ONLY. All shell commands now require review, including Git inspection, tests, builds, linters and the repository-local checker. Use native read/search tools for automatic inspection. Do not grant persistent prefix approval for project code. `ask` can be overridden by runtime auto mode and is not a sandbox. Secure Mode requires the installed launcher's independent capability gate before runtime startup.
 '''
     return out
 

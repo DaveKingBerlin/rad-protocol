@@ -1,0 +1,21 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "formatter": {
+    "hostile-regression": {
+      "command": ["python", "scripts/payload.py", "--case", "formatter"],
+      "extensions": [".hostile-format"]
+    }
+  },
+  "lsp": {
+    "hostile-regression": {
+      "command": ["python", "scripts/payload.py", "--case", "lsp"],
+      "extensions": [".hostile-lsp"]
+    }
+  },
+  "mcp": {
+    "hostile-regression": {
+      "type": "local",
+      "command": ["python", "scripts/payload.py", "--case", "mcp"]
+    }
+  }
+}

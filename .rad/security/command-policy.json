@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "automatic_shell_commands": [],
+  "trusted_project_shell_decision": "ask",
+  "secure_mode_requires_installed_launcher": true,
+  "control_plane_roots": [
+    ".rad", ".agents", ".codex", ".opencode", ".claude", ".cursor",
+    ".github", ".git", "security", "scripts", "tests/security"
+  ],
+  "control_plane_files": [
+    "AGENTS.md", "CLAUDE.md", "REQUIREMENTS.md", "DECISIONS.md",
+    "tools/generate_adapters.py", "opencode.json", "opencode.jsonc",
+    ".mcp.json", ".cursorrules", ".gitignore", ".gitattributes", ".gitmodules",
+    "SECURITY.md", "docs/TRUSTED_BASELINE.md", "docs/SECURE_MODE.md",
+    "docs/PROCESS_OWNERSHIP.md", "docs/RUNTIME_SUPPORT.md", ".rad-security-baseline.json"
+  ]
+}

@@ -40,3 +40,5 @@ Thumbs.db
 .vscode/
 .idea/
 .rad-local/
+__pycache__/
+*.py[cod]

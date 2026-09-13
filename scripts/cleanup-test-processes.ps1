@@ -1,36 +1,31 @@
-param()
-$dir="e2e/artifacts/processes"
-if(-not(Test-Path $dir)){Write-Host "No RAD process metadata.";exit 0}
+param(
+    [string]$WorkingDirectory = ".",
+    [string]$TrustedHelperPath = $env:RAD_TRUSTED_PROCESS_HELPER,
+    [string]$PythonExecutable = $env:RAD_TRUSTED_PYTHON,
+    [string]$StateDirectory = $env:RAD_PROCESS_STATE_DIRECTORY,
+    [string]$TrustKeyFile = $env:RAD_PROCESS_TRUST_KEY
+)
 
-Get-ChildItem $dir -Filter "test-app-*.json" -File | ForEach-Object {
-    try {
-        $m = Get-Content $_.FullName -Raw | ConvertFrom-Json
+$ErrorActionPreference = "Stop"
+$project = (Resolve-Path -LiteralPath $WorkingDirectory).Path
+if ([string]::IsNullOrWhiteSpace($TrustedHelperPath) -or [string]::IsNullOrWhiteSpace($PythonExecutable)) {
+    throw "Trusted helper and Python executable absolute paths are required."
+}
+$helper = (Resolve-Path -LiteralPath $TrustedHelperPath).Path
+$python = (Resolve-Path -LiteralPath $PythonExecutable).Path
+if ($helper.StartsWith($project + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase) -or
+    $python.StartsWith($project + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "Secure process cleanup refuses helper or interpreter code from the untrusted project."
+}
+if ([string]::IsNullOrWhiteSpace($StateDirectory)) {
+    $StateDirectory = Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "RAD\security\processes"
+}
+$state = (Resolve-Path -LiteralPath $StateDirectory).Path
+if ([string]::IsNullOrWhiteSpace($TrustKeyFile)) {
+    $TrustKeyFile = Join-Path $state "process-control.key"
+}
 
-        # Current metadata schema records all process identities explicitly.
-        $recorded = @()
-        if ($null -ne $m.owned_pids) {
-            $recorded += @($m.owned_pids | ForEach-Object { [int]$_ })
-        }
-        if ($null -ne $m.root_pid) { $recorded += [int]$m.root_pid }
-        if ($null -ne $m.listener_pid) { $recorded += [int]$m.listener_pid }
-
-        # Backward-compatible read only for older metadata. Never infer ownership.
-        if ($recorded.Count -eq 0 -and $null -ne $m.pid) {
-            $recorded += [int]$m.pid
-        }
-
-        $recorded = @($recorded | Where-Object { $_ -gt 0 } | Sort-Object -Unique)
-        $alive = @($recorded | Where-Object {
-            $null -ne (Get-Process -Id $_ -ErrorAction SilentlyContinue)
-        })
-
-        if ($alive.Count -gt 0) {
-            Write-Host "Recorded RAD process PID(s) $($alive -join ', ') still exist; leaving metadata untouched."
-        } else {
-            Remove-Item $_.FullName -Force
-            Write-Host "Removed stale metadata $($_.Name)"
-        }
-    } catch {
-        Write-Host "Could not process $($_.FullName): $($_.Exception.Message)"
-    }
+& $python -I -B $helper cleanup --project $project --state-directory $state --trust-key-file $TrustKeyFile
+if ($LASTEXITCODE -ne 0) {
+    throw "Cleanup retained active or unauthenticated state; no process was terminated (exit $LASTEXITCODE)."
 }

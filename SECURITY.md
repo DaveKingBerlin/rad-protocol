@@ -1,5 +1,59 @@
 # Security Policy
 
+## Phase 2D status
+
+**Codex WSL2 is the first certified hostile-project Secure Mode backend.**
+
+- Codex CLI 0.153.4 inside the dedicated hardened `RAD-Secure-Test` WSL2
+  distribution is **SUPPORTED** for hostile-project Secure Mode: the Linux
+  bubblewrap sandbox denies raw sockets entirely (private network namespace,
+  no routes, DNS blocked), the project runs in the Linux filesystem as a
+  non-root user, Windows interop is disabled and drives are not mounted, and
+  the repository control plane is immutable at the OS layer (root-owned
+  `chattr +i`).
+- **Codex native Windows stays TRUSTED-PROJECT ONLY** (host loopback remained
+  reachable in the Phase-2C native probes). A platform/runtime/version is part
+  of any certification; "Codex" is never generically secure.
+- OpenCode, Claude Code and Cursor remain TRUSTED-PROJECT ONLY.
+- SEC-001 is **FIXED** (at least one technically verified hostile-project
+  backend + launcher refuses uncertified/uncertified-in-combination backend/
+  platform). SEC-002 and AGT-001 remain fixed (104/104 security regressions).
+
+See [Secure Mode](docs/SECURE_MODE.md), the
+[runtime matrix](docs/RUNTIME_SUPPORT.md), the
+[trusted installation requirements](docs/TRUSTED_BASELINE.md) and the
+[Phase 2D report](docs/PHASE2D_REPORT.md).
+
+The launcher refuses uncertified backend/platform combinations. Job Object
+teardown and the independent baseline/structured file broker have regression
+tests. A passing refusal test is not a passing sandbox test.
+
+## Phase 4 (security remediation)
+
+Phase 4 remediated the independent Phase 3 findings PH3-001..PH3-009:
+
+- **PH3-001** executable shadowing: `wsl.exe`/`icacls.exe`/`powershell.exe`
+  are resolved only from `%SystemRoot%\System32`.
+- **PH3-002/003** shell interpolation and root temp scripts: strict generated
+  run roots, deterministic quoting, root-private 0700 script staging.
+- **PH3-004** WSL guard fail-closed via structured JSON with per-path
+  immutable verification.
+- **PH3-005** Windows append bypass closed (deny `AD`/`WEA`); WRITE_DAC/Owner
+  remain the documented separate-principal residual.
+- **PH3-006** protected leaves derived from the verified baseline (incl.
+  nested leaves below product directories).
+- **PH3-007** one public secure-launch path (`launch --runtime codex-wsl`
+  → verify/pin → stage → guard → sandbox → cleanup); helper functions are wired
+  into it.
+- **PH3-008** secret-aware staging (`.env`, credentials, `.git/**` excluded;
+  size limits; streamed).
+- **PH3-009** exact ACL restore from SDDL snapshots.
+- Guardian hardens malformed UTF-8 control input (safe failure, no Job teardown).
+
+Codex WSL2 remains **SUPPORTED only** with the pinned tuple (Codex 0.153.4
+linux-x64, SHA-256 enforced, distro `RAD-Secure-Test`); the launcher refuses
+startup without the independent binary pin. See `docs/PHASE4_REPORT.md`.
+
 ## Reporting a vulnerability
 
 While the repository is private, report security issues directly to the repository owner.

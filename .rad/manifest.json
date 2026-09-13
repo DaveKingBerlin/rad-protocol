@@ -39,8 +39,10 @@
     ".rad/policies/external-cost-safety.md",
     ".rad/policies/git-checkpoints.md",
     ".rad/policies/process-lifecycle.md",
-    ".rad/policies/public-naming.md"
+    ".rad/policies/public-naming.md",
+    ".rad/policies/security-boundary.md"
   ],
+  "command_policy": ".rad/security/command-policy.json",
   "generated_adapters": [
     "codex",
     "opencode",

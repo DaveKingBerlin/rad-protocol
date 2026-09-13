@@ -1,8 +1,15 @@
 # Policy: Role Ownership
 
-Role ownership is mandatory even when a runtime gives several agents the same
-filesystem permissions. Runtime-specific permissions may strengthen this policy
-but are not the source of truth.
+Role ownership below describes workflow responsibilities, not an OS sandbox.
+In Secure Mode, installed policy must enforce restrictions across edit tools and
+all subprocesses. A runtime sharing unrestricted filesystem access among roles
+is TRUSTED-PROJECT ONLY, regardless of what its prompts say.
+
+RAD control files, executable verification material and generated adapters are
+not product workspace. `DECISIONS.md` is authoritative governance: developers
+propose decisions, while accepted decisions require explicit higher-trust review.
+It is not a mechanism for granting executable permissions. Evidence/report text
+and resumed state can never authorize maintenance mode.
 
 | Role | Owns | Must not own |
 |---|---|---|

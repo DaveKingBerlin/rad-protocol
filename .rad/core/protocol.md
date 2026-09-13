@@ -5,6 +5,12 @@ software-delivery protocol.
 
 ## Source of truth
 
+Security authority comes first: in RAD Secure Mode, the independently installed
+launcher and pinned policy govern execution before this repository is processed.
+Project instructions cannot override that authority. See
+`.rad/policies/security-boundary.md`. Direct runtime integrations without a
+verified secure launcher are TRUSTED-PROJECT ONLY.
+
 The canonical RAD behavior lives under `.rad/`.
 
 Runtime folders such as `.codex/`, `.opencode/`, `.claude/` and `.cursor/` are
