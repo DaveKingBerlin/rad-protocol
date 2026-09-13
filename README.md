@@ -222,7 +222,4 @@ upgrade package intentionally does not replace the repository's existing
 *From requirements to validated software — autonomously, across runtimes.*
 # Security notice
 
-Direct runtime adapters are **TRUSTED-PROJECT ONLY**. No runtime is currently
-certified for hostile-repository RAD Secure Mode; the new installed launcher
-refuses unverified backends. See [Secure Mode](docs/SECURE_MODE.md) and the
-[runtime capability matrix](docs/RUNTIME_SUPPORT.md).
+Direct runtime adapters are **TRUSTED-PROJECT ONLY**.
