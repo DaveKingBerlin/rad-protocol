@@ -211,22 +211,22 @@ Inspired in part by Ed Donner’s public multi-agent development setup, especial
 
 ## License
 
-RAD Protocol is intended for the repository's existing **GPL-3.0** license. This
-upgrade package intentionally does not replace the repository's existing
-`LICENSE` file.
+RAD Protocol is licensed under the **GNU General Public License v3.0 (GPL-3.0)**.
 
----
+See [LICENSE](LICENSE) for the full license text.
 
 **RAD Protocol — Runtime-Agnostic Delivery Protocol**
 
 *From requirements to validated software — autonomously, across runtimes.*
-# Security notice
 
-Direct runtime adapters are TRUSTED-PROJECT ONLY.
+## Security notice
+
+Direct runtime adapters are **TRUSTED-PROJECT ONLY**.
 
 Hostile-project RAD Secure Mode is currently certified only for the pinned
-Codex CLI inside the dedicated hardened RAD-Secure-Test WSL2 environment.
+Codex CLI inside the dedicated hardened `RAD-Secure-Test` WSL2 environment.
 Native Windows Codex and OpenCode/Claude Code/Cursor remain
-TRUSTED-PROJECT ONLY.
+**TRUSTED-PROJECT ONLY**.
 
-See Secure Mode and the runtime capability matrix.
+See [Secure Mode](docs/SECURE_MODE.md) and the
+[runtime capability matrix](docs/RUNTIME_SUPPORT.md).
