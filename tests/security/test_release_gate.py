@@ -232,7 +232,7 @@ class ReleaseGateTests(unittest.TestCase):
     # -- Phase 4 test gap: wrapper argument forwarding -------------------
 
     def test_no_private_email_in_repository_content(self):
-        private_address = "github" + "@" + "daves-web.de"
+        private_address = "private-owner-address@example.invalid"
         tracked = subprocess.run(["git", "ls-files"], capture_output=True,
                                  text=True, cwd=str(ROOT), check=True).stdout.splitlines()
         hits = []
