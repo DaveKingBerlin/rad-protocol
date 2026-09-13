@@ -128,13 +128,171 @@ def validate_trusted_state_paths(project: Path, state_directory: Path, key_file:
     state = canonical_directory(state)
     if key.exists() or key.is_symlink():
         _require_regular_single_link(key)
+    # P1-6: the trust key and metadata must be reachable only by the owning
+    # principal (plus SYSTEM/Administrators).  Other principals (local users,
+    # service/sandbox accounts) must not read them.  Fail closed, never silently
+    # proceed with a broad ACL.
+    harden_state_directory(state, key)
+    if not state_directory_is_secure(state, key):
+        raise ProcessSecurityError(
+            "process state/trust key are not restricted to the owning principal; "
+            "refusing to continue with an unprotected ACL")
     return state, key
+
+
+def _system32_tool(name: str) -> str:
+    """Absolute trusted system executable (P1-6); never PATH-resolved."""
+    import ctypes as _ctypes
+    buffer = _ctypes.create_unicode_buffer(32768)
+    length = _ctypes.windll.kernel32.GetWindowsDirectoryW(buffer, len(buffer))
+    if not 0 < length < len(buffer):
+        raise ProcessSecurityError("cannot determine trusted Windows directory")
+    candidate = Path(buffer.value) / "System32" / name
+    if not candidate.is_file():
+        raise ProcessSecurityError("trusted system tool missing: %s" % candidate)
+    return str(candidate)
+
+
+def _owner_sid() -> str:
+    """Current user SID via `whoami /user` (trusted absolute executable)."""
+    message = subprocess.run(
+        [_system32_tool("whoami.exe"), "/user"],
+        capture_output=True, text=True, errors="replace", timeout=30,
+        check=False)
+    match = re.search(r"\bS-1-[0-9]+(?:-[0-9]+)*", message.stdout)
+    if match is None:
+        raise ProcessSecurityError("cannot determine current user SID")
+    return match.group(0)
+
+
+def _hardened_grants(directory: bool) -> list[str]:
+    suffix = "(OI)(CI)F" if directory else "F"
+    return ["*%s:%s" % (sid, suffix)
+            for sid in ("S-1-5-18", "S-1-5-32-544", _owner_sid())]
+
+
+def _icacls(path: Path, *arguments) -> None:
+    process = subprocess.run(
+        [_system32_tool("icacls.exe"), str(path)] + list(arguments),
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, errors="replace", timeout=60, check=False)
+    if process.returncode != 0:
+        raise ProcessSecurityError("cannot set ACL on %s: %s"
+                                   % (path, process.stdout.strip()[-200:]))
+
+
+_DENY_PRINCIPAL_TOKENS = ("Jeder", "Everyone", "Benutzer", "Users",
+                          "S-1-1-0", "S-1-5-32-545")
+# ACE-anchored principal detection: the principal column follows whitespace
+# and precedes ':(flags)'.  A bare path substring such as C:\Users\ must not
+# trigger a false positive.
+_BROAD_ACE = re.compile(
+    r"\s(?:Jeder|Everyone|Benutzer|Users|\*?S-1-1-0|\*?S-1-5-32-545)\s*:\(")
+
+
+def harden_state_directory(state: Path, key_file: Path) -> None:
+    """P1-6: restrict state dir and trust key to owner/SYSTEM/Administrators.
+
+    Called after state provisioning so the trust key and metadata are not
+    readable by other principals (local users, service accounts, sandbox
+    users).  Fails closed if the ACL cannot be established.
+    """
+    if os.name != "nt":
+        return
+    dir_arguments = ["/inheritance:r"]
+    for grant in _hardened_grants(True):
+        dir_arguments += ["/grant:r", grant]
+    file_arguments = ["/inheritance:r"]
+    for grant in _hardened_grants(False):
+        file_arguments += ["/grant:r", grant]
+    try:
+        _icacls(state, *dir_arguments)
+        if key_file.exists():
+            _icacls(key_file, *file_arguments)
+    except ProcessSecurityError as error:
+        raise ProcessSecurityError("cannot secure process state: %s" % error) from error
+
+
+def state_directory_is_secure(state: Path, key_file: Path) -> bool:
+    """P1-6: verify no other principal has read/write access through the DACL."""
+    if os.name != "nt":
+        return True
+    return _acl_has_no_broad_grants(state) and (not key_file.exists()
+                                                or _acl_has_no_broad_grants(key_file))
+
+
+def _acl_text(path: Path) -> str:
+    process = subprocess.run(
+        [_system32_tool("icacls.exe"), str(path)],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, errors="replace", timeout=60, check=False)
+    return process.stdout
+
+
+def _acl_has_no_broad_grants(path: Path) -> bool:
+    text = _acl_text(path)
+    return not _BROAD_ACE.search(text)
+
+
+_NT_LINK_COUNT = None
+
+
+class _FileIdentity(ctypes.Structure):
+    _fields_ = [("attributes", wintypes.DWORD), ("creation", wintypes.FILETIME),
+                ("access", wintypes.FILETIME), ("write", wintypes.FILETIME),
+                ("volume", wintypes.DWORD), ("size_high", wintypes.DWORD),
+                ("size_low", wintypes.DWORD), ("links", wintypes.DWORD),
+                ("index_high", wintypes.DWORD), ("index_low", wintypes.DWORD)]
+
+
+def _nt_link_count(path: Path) -> Optional[int]:
+    """Accurate NTFS link count via GetFileInformationByHandle.
+
+    ``os.lstat().st_nlink`` on Windows can return 0 after an icacls ACL
+    rewrite; the file handle API returns the true link count and is used to
+    keep rejecting genuine hard links without false-positives.
+    """
+    global _NT_LINK_COUNT
+    import ctypes as _ctypes
+    from ctypes import wintypes
+    if _NT_LINK_COUNT is None:
+        _NT_LINK_COUNT = _ctypes.WinDLL("kernel32", use_last_error=True)
+        _NT_LINK_COUNT.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD,
+                                               wintypes.DWORD, _ctypes.c_void_p,
+                                               wintypes.DWORD, wintypes.DWORD,
+                                               wintypes.HANDLE]
+        _NT_LINK_COUNT.CreateFileW.restype = wintypes.HANDLE
+        _NT_LINK_COUNT.GetFileInformationByHandle.argtypes = [
+            wintypes.HANDLE,
+            _ctypes.POINTER(_FileIdentity)]
+        _NT_LINK_COUNT.GetFileInformationByHandle.restype = wintypes.BOOL
+        _NT_LINK_COUNT.CloseHandle.argtypes = [wintypes.HANDLE]
+    FILE_READ_ATTRIBUTES = 0x0080
+    SYNCHRONIZE = 0x00100000
+    OPEN_EXISTING = 3
+    handle = _NT_LINK_COUNT.CreateFileW(str(path), FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                                        0, None, OPEN_EXISTING, 0, None)
+    if handle == _ctypes.c_void_p(-1).value:
+        raise ProcessSecurityError("cannot open process state for identity check")
+    try:
+        info = _FileIdentity()
+        if not _NT_LINK_COUNT.GetFileInformationByHandle(handle, _ctypes.byref(info)):
+            raise ProcessSecurityError("cannot read process state identity")
+        return int(info.links)
+    finally:
+        _NT_LINK_COUNT.CloseHandle(handle)
 
 
 def _require_regular_single_link(path: Path) -> None:
     info = path.lstat()
-    if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+    if (not stat.S_ISREG(info.st_mode)
             or getattr(info, "st_file_attributes", 0) & 0x400):
+        raise ProcessSecurityError("linked or non-regular process state refused")
+    if os.name == "nt":
+        links = _nt_link_count(path)
+        if links != 1:
+            raise ProcessSecurityError("linked or non-regular process state refused")
+    elif info.st_nlink != 1:
         raise ProcessSecurityError("linked or non-regular process state refused")
 
 

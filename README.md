@@ -11,6 +11,12 @@ The canonical workflow lives in **`.rad/`**. Codex, OpenCode, Claude Code and
 Cursor integrations are thin generated adapters around the same roles, workflows
 and policies.
 
+> **Platform scope:** hostile-project Secure Mode is certified only for a
+> pinned Codex CLI inside a dedicated hardened WSL2 distribution; native
+> Windows Codex and OpenCode/Claude Code/Cursor remain TRUSTED-PROJECT ONLY.
+> The test-process lifecycle wrappers (`scripts/*-test-app.ps1`,
+> `cleanup-test-processes.ps1`) are Windows-only by design.
+
 ## Architecture
 
 ```text

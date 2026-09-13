@@ -84,8 +84,12 @@ _DIR_DENY = "(WD,AD,DC,DE,WA,WEA)"
 _ROOT_DENY = "(WD,AD,DC)"
 
 _MAX_GUARDED_ENTRIES = 2000
+_MAX_GUARD_TRAVERSAL = 200000
 _MAX_GUARD_DEPTH = 64
-_SKIPPED_PARTS = frozenset({".git", ".hg", ".svn"})
+# node_modules is deliberately skipped: it is an install artifact the baseline
+# admission gate re-verifies anyway, and skipping keeps large dependency trees
+# from consuming the traversal/entry budget.
+_SKIPPED_PARTS = frozenset({".git", ".hg", ".svn", "node_modules"})
 
 _REPARSE_FLAG = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
@@ -150,7 +154,8 @@ def control_plane_entries(project_root, protected_relative: Optional[Iterable[st
     root = canonicalize_existing_directory(project_root)
     files: List[Path] = []
     directories: List[Path] = []
-    count = 0
+    protected = 0
+    traversed = 0
     stack: List[Tuple[Path, int]] = [(root, 0)]
     while stack:
         directory, depth = stack.pop()
@@ -164,6 +169,10 @@ def control_plane_entries(project_root, protected_relative: Optional[Iterable[st
             if _is_locked_out(name):
                 continue
             child = directory / name
+            traversed += 1
+            if traversed > _MAX_GUARD_TRAVERSAL:
+                raise GuardError(
+                    "control-plane guard traversal limit exceeded; operator review required")
             try:
                 info = child.lstat()
             except OSError as error:
@@ -183,26 +192,28 @@ def control_plane_entries(project_root, protected_relative: Optional[Iterable[st
                 or any(relative.startswith(prefix + "/")
                        for prefix in protected_relative))
             if is_dir:
-                # Always descend into non-skipped directories so that protected
-                # leaves below ordinary product directories are discovered
-                # (PH3-006).  Only control-classed/baseline directories are
-                # returned for directory-level denial.
-                count += 1
-                if count > _MAX_GUARDED_ENTRIES:
-                    raise GuardError(
-                        "control-plane guard entry limit exceeded; operator review required")
+                # Descend into every non-skipped directory so protected leaves
+                # below ordinary directories are discovered (PH3-006).  Only
+                # control-classed/baseline directories count against the
+                # protected-entry budget (P1-5) and are returned for denial.
                 if file_class in (FileClass.CONTROL_PLANE,
                                   FileClass.GENERATED_CONTROL_OUTPUT) or baseline_protected:
+                    protected += 1
+                    if protected > _MAX_GUARDED_ENTRIES:
+                        raise GuardError(
+                            "control-plane guard protected-entry limit exceeded; "
+                            "operator review required")
                     directories.append(child)
                 stack.append((child, depth + 1))
             else:
                 if file_class not in (FileClass.CONTROL_PLANE,
                                       FileClass.GENERATED_CONTROL_OUTPUT) and not baseline_protected:
                     continue
-                count += 1
-                if count > _MAX_GUARDED_ENTRIES:
+                protected += 1
+                if protected > _MAX_GUARDED_ENTRIES:
                     raise GuardError(
-                        "control-plane guard entry limit exceeded; operator review required")
+                        "control-plane guard protected-entry limit exceeded; "
+                        "operator review required")
                 files.append(child)
     return files, directories
 
@@ -353,7 +364,7 @@ def _append_denied(path: Path) -> bool:
 def harden_installation(install_root) -> int:
     """Make an installed authority tree mutation-denied for every principal."""
     root = canonicalize_existing_directory(install_root)
-    entries: List[Path] = []
+    entries: List[Path] = [root]
     for current_text, directories, filenames in os.walk(root):
         current = Path(current_text)
         for name in directories:

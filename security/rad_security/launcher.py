@@ -248,7 +248,7 @@ def _file_hash(source):
 
 def launch_trusted_project(installation, project, runtime, expected_release_sha256,
                            executable, executable_sha256, acknowledge=False,
-                           guard_control_plane=False):
+                           guard_control_plane=False, protected_relative=None):
     """Explicit compatibility path. Never called as a Secure Mode fallback.
 
     With ``guard_control_plane`` the repository control plane is locked at the
@@ -258,16 +258,18 @@ def launch_trusted_project(installation, project, runtime, expected_release_sha2
     """
     if acknowledge is not True:
         raise SecurityBoundaryError("Explicit --acknowledge-trusted-project is required")
-    installation, project, _ = _verified_installation(
+    installation, project, manifest = _verified_installation(
         installation, project, expected_release_sha256)
     _capability(runtime)
     executor = verify_runtime_executable(executable, project, executable_sha256)
+    if protected_relative is None:
+        protected_relative = [record.path for record in manifest.files]
     # No arbitrary runtime arguments, environment files or executable resolution.
     import tempfile
 
     if guard_control_plane:
         import tempfile
-        guard = lock_control_plane(project)
+        guard = lock_control_plane(project, protected_relative)
         try:
             guard.verify()
             with tempfile.TemporaryDirectory(prefix="rad-guarded-run-") as state:

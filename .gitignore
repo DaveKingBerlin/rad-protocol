@@ -42,3 +42,11 @@ Thumbs.db
 .rad-local/
 __pycache__/
 *.py[cod]
+
+# Private review/audit prompts (must never be published; one contains an
+# address that is intentionally kept out of the public repository)
+/Phase5.md
+/Phase6.md
+/Phase7.md
+/Phase7A.md
+/KimiK3ReviewReport.md

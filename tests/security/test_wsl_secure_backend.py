@@ -29,7 +29,8 @@ from security.rad_security.wsl_backend import (
     DEFAULT_DISTRO,
     DEFAULT_USER,
     WslBackendError,
-    _measure_codex,
+    _codex_version,
+    _hash_only_codex,
     _wsl_root,
     _wsl_user,
     clean_remote,
@@ -56,7 +57,8 @@ def _has_wsl_backend() -> bool:
 
 
 def _measure_pin():
-    digest, measured = _measure_codex(DEFAULT_DISTRO, DEFAULT_USER, CODEX_PATH)
+    digest = _hash_only_codex(DEFAULT_DISTRO, DEFAULT_USER, CODEX_PATH)
+    measured = _codex_version(DEFAULT_DISTRO, DEFAULT_USER, CODEX_PATH)
     return digest, measured
 
 
@@ -180,6 +182,60 @@ class WslSecureBackendTests(unittest.TestCase):
                                          codex_version=self.codex_ver)
         self.assertEqual(DEFAULT_DISTRO, admitted["distro"])
         self.assertEqual("codex-wsl", admitted["runtime"])
+
+    # -- P1-3: pin-before-execute -------------------------------------
+
+    def test_fake_codex_not_executed_on_wrong_hash(self):
+        """A wrong/hostile binary at codex_path must be hashed, refused and
+        NEVER invoked; a sentinel marker proves no execution occurred."""
+        fake = "/home/%s/fake-codex-%s" % (DEFAULT_USER, __import__("secrets").token_hex(4))
+        marker = "%s.executed" % fake
+        import base64 as _b64
+        script = ("echo 'codex-cli 0.153.4'; touch %s" % marker)
+        _wsl_user(DEFAULT_DISTRO, DEFAULT_USER,
+                  "printf '%%s' '%s' | base64 -d > %s && chmod 700 %s"
+                  % (_b64.b64encode(script.encode()).decode(), fake, fake))
+        try:
+            digest = _hash_only_codex(DEFAULT_DISTRO, DEFAULT_USER, fake)
+            self.assertIsNot(digest, None)
+            wrong_pin = "0" * 64
+            backend = verify_wsl_backend(distro=DEFAULT_DISTRO, user=DEFAULT_USER,
+                                         codex_path=fake, codex_sha256=wrong_pin,
+                                         codex_version="0.153.4", probe=False)
+            self.assertFalse(backend["ok"])
+            executed = _wsl_user(DEFAULT_DISTRO, DEFAULT_USER,
+                                 "test -e %s && echo YES || echo NO" % marker)
+            self.assertIn("NO", executed.stdout,
+                          "wrong-hash binary must never be executed")
+            # Correct pin: hash matches, so it may be executed and version checked.
+            good = verify_wsl_backend(distro=DEFAULT_DISTRO, user=DEFAULT_USER,
+                                      codex_path=fake, codex_sha256=digest,
+                                      codex_version="0.153.4", probe=False)
+            self.assertTrue(good["ok"] if good["ok"] else
+                            all(not c["ok"] for c in good["checks"]
+                                if c["check"] == "codex-version"))
+            executed = _wsl_user(DEFAULT_DISTRO, DEFAULT_USER,
+                                 "test -e %s && echo YES || echo NO" % marker)
+            self.assertIn("YES", executed.stdout,
+                          "hash-validated binary may be invoked for version check")
+        finally:
+            _wsl_user(DEFAULT_DISTRO, DEFAULT_USER,
+                      "rm -f -- %s %s" % (fake, marker))
+
+    # -- P2-9: symlink rejection in staging -----------------------------
+
+    def test_stage_project_rejects_symlinks(self):
+        local = Path(self.temporary.name) / "symlink-project"
+        local.mkdir()
+        (local / "AGENTS.md").write_text("x", encoding="utf-8")
+        (local / "target.txt").write_text("target", encoding="utf-8")
+        try:
+            os.symlink(local / "target.txt", local / "link.txt")
+        except OSError:
+            self.skipTest("host does not support symlink creation")
+        with self.assertRaises(WslBackendError):
+            stage_project(local, DEFAULT_DISTRO)
+        os.unlink(local / "link.txt")
 
     # -- PH3-001: executable shadowing --------------------------------
 

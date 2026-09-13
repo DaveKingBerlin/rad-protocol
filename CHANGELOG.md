@@ -1,5 +1,41 @@
 # Changelog
 
+## 3.0.0-beta.1
+
+### Security remediation
+
+- Introduced the installed RAD security package (`security/rad_security/`) with
+  an externally pinned release baseline, a strict manifest verifier, structured
+  file/role classification and a bounded handle-based product-file broker.
+- Removed all automatic shell-prefix safe lists; the canonical shell allowlist
+  is empty and legacy runtime adapters require explicit review.
+- Added a reversible Windows ACL control-plane guard with exact security
+  descriptor (SDDL) snapshot/restore and OS-level descendent write denial.
+- Added Windows Job Object process ownership with HMAC-authenticated metadata,
+  creation-time identity checks and no PID-from-metadata termination.
+- Added fail-closed runtime capability admission: only a natively verified
+  backend may execute hostile-project Secure Mode.
+- Certified **Codex CLI 0.153.4 in the dedicated hardened WSL2 distribution
+  `RAD-Secure-Test`** as the first hostile-project Secure Mode backend, with
+  pinned binary/version, network-denied sandbox, unstaged secret exclusion and
+  immutable root-owned control-plane leaves.
+- Kept native Windows Codex and OpenCode/Claude Code/Cursor integrations
+  TRUSTED-PROJECT ONLY unless separately certified.
+
+### Harness and reproducibility
+
+- Generated adapters carry a normalized canonical-core hash; CRLF/LF is
+  normalized before hashing so Windows checkouts do not drift.
+- Preflight is strictly read-only and reports repair steps without applying
+  them.
+- Added independent adversarial, defect-lifecycle, evidence, deterministic
+  testing and external-cost policies as the canonical final gate inputs.
+
+### Project identity
+
+- Renamed the project to **RAD Protocol — Runtime-Agnostic Delivery Protocol**
+  and standardized `.rad/`, `rad_version`, and `/rad-*` command naming.
+
 ## 3.0.0-alpha.3
 
 ### Project identity

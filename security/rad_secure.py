@@ -17,9 +17,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from rad_security.launcher import (NetworkPolicy, launch_trusted_project,
                                    matrix_as_dicts, prepare_secure_launch,
                                    verify_project)
-from rad_security.guard import GuardError, lock_control_plane
+from rad_security.guard import GuardError, lock_control_plane, protected_paths_from_baseline
+from rad_security.baseline import load_verified_installation
 from rad_security.policy import Role
 from rad_security.workspace import ProductWorkspace, MAX_DATA_BYTES
+
+
+def _protected_paths(installation, release_sha256):
+    return protected_paths_from_baseline(
+        load_verified_installation(installation, release_sha256))
 
 
 def main(argv=None):
@@ -66,8 +72,9 @@ def main(argv=None):
             return 0
         if args.operation == "guard":
             verify_project(installation, args.project, args.release_sha256)
+            protected = _protected_paths(installation, args.release_sha256)
             if args.action == "lock":
-                guarded = lock_control_plane(args.project)
+                guarded = lock_control_plane(args.project, protected)
                 guarded.verify()
                 print(json.dumps({
                     "control_plane": "locked",
@@ -77,14 +84,14 @@ def main(argv=None):
             if args.action == "verify":
                 # Purely observational; never changes ACL state.
                 from rad_security.guard import check_control_plane_locked
-                if check_control_plane_locked(args.project):
+                if check_control_plane_locked(args.project, protected):
                     print(json.dumps({"control_plane": "guard-effective"}, indent=2))
                     return 0
                 print(json.dumps({"control_plane": "not-locked"}, indent=2), file=sys.stderr)
                 return 2
             if args.action == "unlock":
                 from rad_security.guard import unlock_control_plane
-                count = unlock_control_plane(args.project)
+                count = unlock_control_plane(args.project, protected)
                 print(json.dumps({"control_plane": "unlocked", "entries": count}, indent=2))
                 return 0
         if args.operation in ("read", "write"):
@@ -109,9 +116,13 @@ def main(argv=None):
                 verify_project(installation, args.project, args.release_sha256)
                 environment = {}
                 for entry in args.wsl_env:
-                    if "=" not in entry or entry.count("=") != 1:
+                    if "=" not in entry:
                         parser.error("--wsl-env must be NAME=VALUE")
                     name, value = entry.split("=", 1)
+                    if not name or not all(
+                            c.isalnum() or c == "_" for c in name) \
+                            or not (name[0].isalpha() or name[0] == "_"):
+                        parser.error("--wsl-env NAME must be a valid environment variable name")
                     environment[name] = value
                 inner = ["bash", "-c", args.wsl_command] if args.wsl_command else []
                 result = launch_secure_run(
@@ -119,6 +130,7 @@ def main(argv=None):
                     codex_sha256=args.wsl_codex_sha256,
                     inner=inner,
                     environment=environment,
+                    protected_relative=_protected_paths(installation, args.release_sha256),
                 )
                 print(json.dumps({
                     "backend": "codex-wsl",
@@ -130,9 +142,13 @@ def main(argv=None):
                     "stdout_tail": (result.get("stdout") or "")[-2000:],
                 }, indent=2))
                 return 0 if result["ok"] else 2
-            admitted = prepare_secure_launch(installation, args.project, args.runtime,
-                                             args.release_sha256, args.network)
-            return 0
+            # Any other secure-mode request must clear the capability gate; every runtime
+            # other than codex-wsl raises SecureModeUnavailable here by design.
+            prepare_secure_launch(installation, args.project, args.runtime,
+                                  args.release_sha256, args.network)
+            raise AssertionError(
+                "certified runtimes are routed to their dedicated executor before this branch; "
+                "this line must never be reached")
         if args.network != NetworkPolicy.TRUSTED.value:
             parser.error("Trusted-project launch requires --network 'UNRESTRICTED TRUSTED MODE'")
         if not args.runtime_executable or not args.runtime_sha256:
@@ -144,7 +160,9 @@ def main(argv=None):
         return launch_trusted_project(installation, args.project, args.runtime,
                                       args.release_sha256, args.runtime_executable,
                                       args.runtime_sha256, args.acknowledge_trusted_project,
-                                      guard_control_plane=True)
+                                      guard_control_plane=True,
+                                      protected_relative=_protected_paths(
+                                          installation, args.release_sha256))
     except (RuntimeError, ValueError, OSError) as exc:
         print("RAD REFUSED: " + str(exc), file=sys.stderr)
         return 2

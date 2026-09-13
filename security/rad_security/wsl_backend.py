@@ -41,6 +41,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import stat
 import subprocess
 import tarfile
 import tempfile
@@ -211,8 +212,19 @@ CONTROL_DIRS = (".rad", ".github", ".opencode", ".codex", ".claude",
 
 
 def distro_exists(distro: str = DEFAULT_DISTRO) -> bool:
+    """Exact, parsed distro-name match (P2-4): a substring must not match
+    ``RAD-Secure-Test-X`` when ``RAD-Secure-Test`` is requested."""
     result = _wsl("-l")
-    return distro in result.stdout
+    for line in result.stdout.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("*"):
+            stripped = stripped[1:].lstrip()
+        name = stripped.split(None, 1)[0] if stripped else ""
+        if name and name == distro:
+            return True
+    return False
 
 
 def wsl_version(distro: str = DEFAULT_DISTRO) -> str:
@@ -222,19 +234,30 @@ def wsl_version(distro: str = DEFAULT_DISTRO) -> str:
     return result.stdout.strip()
 
 
-def _measure_codex(distro: str, user: str, codex_abs: str
-                   ) -> Tuple[Optional[str], Optional[str]]:
+def _hash_only_codex(distro: str, user: str, codex_abs: str) -> Optional[str]:
+    """P1-3: SHA-256 of the executable WITHOUT executing it.
+
+    The pinned binary must never be run merely to establish that it is the
+    pinned binary.  ``sha256sum`` opens the file read-only; it does not exec.
+    """
     probe = _wsl("--", "sh", "-c",
-                 "if [ ! -x '%s' ]; then echo MISSING; exit 0; fi; "
-                 "sha256sum '%s' | cut -d' ' -f1; "
-                 "'%s' --version 2>/dev/null | head -1" % (codex_abs, codex_abs, codex_abs),
+                 "if [ ! -f '%s' ]; then echo MISSING; exit 0; fi; "
+                 "sha256sum '%s' 2>/dev/null | cut -d' ' -f1"
+                 % (codex_abs, codex_abs),
                  distro=distro, user=user, timeout=120)
-    lines = probe.stdout.strip().splitlines()
-    if not lines or lines[0] == "MISSING":
-        return None, None
-    digest = lines[0].strip()
-    version = lines[1].strip() if len(lines) > 1 else ""
-    return digest or None, version or None
+    line = probe.stdout.strip().splitlines()[0].strip() if probe.stdout.strip() else ""
+    if line in ("", "MISSING"):
+        return None
+    return line
+
+
+def _codex_version(distro: str, user: str, codex_abs: str) -> Optional[str]:
+    """Run the already hash-validated executable to confirm its version."""
+    measured = _wsl("--", "sh", "-c",
+                    "'%s' --version 2>/dev/null | head -1" % codex_abs,
+                    distro=distro, user=user, timeout=120)
+    line = measured.stdout.strip().splitlines()[0].strip() if measured.stdout.strip() else ""
+    return line or None
 
 
 def verify_wsl_backend(
@@ -248,10 +271,11 @@ def verify_wsl_backend(
 ) -> Mapping[str, object]:
     """Fail-closed verification of the certified WSL backend.
 
-    ``codex_path`` must be an absolute path inside the distro; ``codex_sha256``
-    is the independently published SHA-256 and ``codex_version`` the expected
-    version.  Any mismatch refuses the backend.  When ``probe`` is set, a
-    harmless self-probe confirms socket denial and control-write denial.
+    Sequence (P1-3): environment prerequisites first (any failure returns
+    before the executable is touched), then the executable hash is computed
+    WITHOUT executing it, compared against the pinned digest, and only a
+    matching binary is ever invoked (for a version sanity check).  A probe
+    optionally confirms socket denial and control-write denial.
     """
     checks: list[dict[str, object]] = []
 
@@ -268,8 +292,10 @@ def verify_wsl_backend(
     version = _wsl("--", "sh", "-c",
                    "id -u; cat /etc/os-release 2>/dev/null | grep PRETTY",
                    distro=distro, user=user)
-    uid = version.stdout.splitlines()[0].strip() if version.stdout.strip() else ""
-    record("non-root-user", uid != "0", "uid=%s" % uid)
+    uid_line = version.stdout.splitlines()[0].strip() if version.stdout.strip() else ""
+    uid_ok = uid_line.isdigit() and uid_line != "0"
+    record("non-root-user", uid_ok,
+           "uid=%s" % (uid_line if uid_line else "unavailable"))
 
     interop = _wsl("--", "sh", "-c",
                    "command -v cmd.exe >/dev/null 2>&1 && echo interop-on || echo interop-off",
@@ -284,10 +310,28 @@ def verify_wsl_backend(
     if not codex_path or not codex_path.startswith("/"):
         record("codex-pin", False, "codex_path must be absolute")
         return {"ok": False, "checks": checks}
-    digest, measured = _measure_codex(distro, user, codex_path)
+
+    # P1-3: fail closed on any environment prerequisite before touching the binary.
+    if not all(item["ok"] for item in checks):
+        for item in checks:
+            if not item["ok"]:
+                record("refused-prerequisites", False,
+                       "stopped before executable access: %s" % item["check"])
+        return {"ok": False, "checks": checks}
+
+    digest = _hash_only_codex(distro, user, codex_path)
     hash_ok = digest is not None and codex_sha256 is not None and digest.lower() == codex_sha256.lower()
     record("codex-hash", hash_ok,
            "sha256=%s" % (digest[:16] if digest else "unable to hash"))
+    if not hash_ok:
+        # Never invoke an unverified binary.
+        return {"ok": False,
+                "distro": distro, "user": user,
+                "codex_path": codex_path,
+                "codex_sha256": codex_sha256, "codex_version": codex_version,
+                "version": CODEX_VERSION, "checks": checks}
+
+    measured = _codex_version(distro, user, codex_path)
     version_ok = codex_version is not None and measured is not None and codex_version in measured
     record("codex-version", version_ok,
            "measured=%s expected=%s" % (measured, codex_version))
@@ -380,6 +424,11 @@ def stage_project(local_root, distro: str, user: str = DEFAULT_USER,
                         continue
                     source = current / name
                     info = source.lstat()
+                    if not stat.S_ISREG(info.st_mode):
+                        # P2-9: defensive symlink/device rejection; do not rely
+                        # on an earlier caller having validated the tree.
+                        raise WslBackendError(
+                            "non-regular file refused in staging: %s" % source)
                     if getattr(info, "st_nlink", 1) != 1:
                         raise WslBackendError("hardlinked file refused in staging: %s" % source)
                     if info.st_size > MAX_STAGED_FILE_BYTES:
@@ -448,10 +497,11 @@ def guard_control_plane_wsl(remote_project: str, distro: str = DEFAULT_DISTRO,
     mandatory = _wsl_mandatory_paths(protected_relative)
     coverage = [name for name in _wsl_coverage_paths(protected_relative)
                 if name not in mandatory]
-    payload = json.dumps({"mandatory": mandatory, "coverage": coverage},
-                         sort_keys=True, separators=(",", ":"))
-    script_generator = None
-    result = _wsl_root(distro, _guard_script(remote_project, payload), timeout=timeout)
+    payload_b64 = base64.b64encode(
+        json.dumps({"mandatory": mandatory, "coverage": coverage},
+                   sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).decode("ascii")
+    result = _wsl_root(distro, _guard_script(remote_project, payload_b64), timeout=timeout)
     try:
         report = json.loads(result.stdout.strip() or "{}")
     except ValueError as error:
@@ -463,20 +513,23 @@ def guard_control_plane_wsl(remote_project: str, distro: str = DEFAULT_DISTRO,
     return report
 
 
-def _guard_script(remote_project: str, payload: str) -> str:
+def _guard_script(remote_project: str, payload_b64: str) -> str:
+    # P2-1: the protected-path payload crosses into the privileged shell as
+    # base64 (charset [A-Za-z0-9+/=] only) and is decoded into a root-owned,
+    # random-named JSON file next to the script (script dir is 0700 root).
+    # No protected path can ever become shell syntax.
     return r'''
 set -eu
 proj=%s
-payload='%s'
+pl="${0%%.sh}.json"
+printf '%%s' '%s' | base64 -d > "$pl" && chmod 600 -- "$pl" || exit 90
+trap 'rm -f -- "$pl" "$proj/.rad-guard-report.tmp"' EXIT
 report="$proj/.rad-guard-report.tmp"
 rm -f -- "$report"
 : > "$report"
-printf '%%s' "$payload" | python3 -c '
-import json, sys
-d = json.load(sys.stdin)
+python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));
 for p in d["mandatory"]: print("M\t" + p)
-for p in d["coverage"]: print("C\t" + p)
-' | while IFS=$'\t' read -r kind rel; do
+for p in d["coverage"]: print("C\t" + p)' "$pl" | while IFS=$'\t' read -r kind rel; do
   [ -n "$rel" ] || continue
   p="$proj/$rel"
   if [ "$kind" = "M" ] && [ ! -e "$p" ]; then echo "MISSING\t$rel" >> "$report"; continue; fi
@@ -513,7 +566,7 @@ sys.stdout.write(json.dumps(
     {"status": "guarded" if not errors else "error",
      "errors": errors}, sort_keys=True) + "\n")
 PYEOF
-''' % (remote_project, payload)
+''' % (remote_project, payload_b64)
 
 
 def unguard_control_plane_wsl(remote_project: str, distro: str = DEFAULT_DISTRO,
@@ -523,17 +576,19 @@ def unguard_control_plane_wsl(remote_project: str, distro: str = DEFAULT_DISTRO,
     mandatory = _wsl_mandatory_paths(protected_relative)
     coverage = [name for name in _wsl_coverage_paths(protected_relative)
                 if name not in mandatory]
-    payload = json.dumps({"mandatory": mandatory, "coverage": coverage},
-                         sort_keys=True, separators=(",", ":"))
+    payload_b64 = base64.b64encode(
+        json.dumps({"mandatory": mandatory, "coverage": coverage},
+                   sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).decode("ascii")
     script = (
-        "set +e; proj=%s; payload='%s'; "
-        "printf '%%s' \"$payload\" | python3 -c '"
-        'import json, sys; d = json.load(sys.stdin);\n'
-        'for p in d["mandatory"] + d["coverage"]: print(p)\' '
-        '| while IFS= read -r rel; do [ -n "$rel" ] || continue; '
-        'p="$proj/$rel"; [ -d "$p" ] && chattr -R -i -- "$p" 2>/dev/null '
-        '|| chattr -i -- "$p" 2>/dev/null; done'
-        % (remote_project, payload)
+        "set +e; proj=%s; pl=\"${0%%.sh}.json\"; "
+        "printf '%%s' '%s' | base64 -d > \"$pl\" && chmod 600 -- \"$pl\" || exit 90; "
+        "python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));"
+        "print(\"\\n\".join(d[\"mandatory\"] + d[\"coverage\"]))' \"$pl\" "
+        "| while IFS= read -r rel; do [ -n \"$rel\" ] || continue; "
+        "p=\"$proj/$rel\"; [ -d \"$p\" ] && chattr -R -i -- \"$p\" 2>/dev/null "
+        "|| chattr -i -- \"$p\" 2>/dev/null; done; rm -f -- \"$pl\""
+        % (remote_project, payload_b64)
     )
     _wsl_root(distro, script, timeout=timeout)
 
@@ -548,6 +603,13 @@ def clean_remote(remote_project: str, distro: str = DEFAULT_DISTRO,
     _wsl_root(distro, "rm -rf -- %s" % run_root, timeout=timeout)
 
 
+def _require_env_name(name: str) -> str:
+    """P2-5: POSIX environment variable name validation (sets only, no '=')."""
+    if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+        raise WslBackendError("invalid environment variable name: %r" % name)
+    return name
+
+
 def _build_sandbox_environment(user: str, extra: Optional[Mapping[str, str]]
                                ) -> Mapping[str, str]:
     env = {
@@ -559,6 +621,7 @@ def _build_sandbox_environment(user: str, extra: Optional[Mapping[str, str]]
     }
     if extra:
         for key, value in extra.items():
+            _require_env_name(key)
             _require_no_control(str(value), "environment value for %s" % key)
             if key.upper() == "PATH" or key in ("HOME", "XDG_RUNTIME_DIR", "TMP", "TMPDIR"):
                 continue

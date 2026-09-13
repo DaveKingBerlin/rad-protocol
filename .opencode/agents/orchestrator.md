@@ -7,7 +7,6 @@ permission:
     "DEFECTS.md": allow
     "ADVERSARIAL_REVIEW.md": allow
     "POC_REPORT.md": allow
-    "DECISIONS.md": allow
     "NAMING_AUDIT.md": allow
     "docs/adr/*": allow
   bash:

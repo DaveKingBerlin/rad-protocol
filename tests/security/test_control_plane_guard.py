@@ -543,6 +543,28 @@ class ControlPlaneGuardAdversarialTests(unittest.TestCase):
                 os.replace(hostile, leaf)
         self.assertEqual(b"nested\r\n", leaf.read_bytes())
 
+    def test_large_dependency_tree_does_not_break_guard(self):
+        node_modules = self.project / "node_modules"
+        for i in range(30):
+            (node_modules / f"pkg{i}/packages/deep/sub").mkdir(parents=True)
+            for j in range(10):
+                (node_modules / f"pkg{i}/packages/deep/sub/file{j}.txt").write_text("x")
+        (self.project / "AGENTS.md").write_text("bootstrap\n", encoding="utf-8")
+        with lock_control_plane(self.project) as guard:
+            guard.verify()
+            with self.assertRaises(PermissionError):
+                (self.project / "AGENTS.md").write_text("blocked", encoding="utf-8")
+
+    def test_harden_installation_covers_root(self):
+        root = self.base / "hardened-root"
+        (root / "sub").mkdir(parents=True)
+        (root / "sub" / "file.txt").write_text("data", encoding="utf-8")
+        self.assertGreaterEqual(harden_installation(root), 1)
+        with self.assertRaises(PermissionError):
+            (root / "new.txt").write_text("x", encoding="utf-8")
+        self.assertGreaterEqual(unharden_installation(root), 1)
+        (root / "new.txt").write_text("x", encoding="utf-8")
+
     def test_cli_guard_lock_verify_unlock_roundtrip(self):
         source = self.base / "reviewed-source"
         build_project(source, with_security=True)

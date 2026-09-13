@@ -72,7 +72,8 @@ _EVIDENCE_EXACT = frozenset(
         "poc_report.md",
     }
 )
-_EVIDENCE_PREFIXES = ("screenshots/evidence", "screenshots/generated", "e2e/artifacts")
+_EVIDENCE_PREFIXES = ("screenshots/evidence", "screenshots/generated", "e2e/artifacts",
+                      "docs/adr")
 _WINDOWS_RESERVED = frozenset(
     {"con", "prn", "aux", "nul", "clock$"}
     | {"com%d" % value for value in range(1, 10)}

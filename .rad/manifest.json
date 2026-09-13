@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "rad_version": "3.0.0-alpha.3",
+  "rad_version": "3.0.0-beta.1",
   "product_contract": "REQUIREMENTS.md",
   "core_protocol": ".rad/core/protocol.md",
   "orchestrator_role": ".rad/roles/orchestrator.md",

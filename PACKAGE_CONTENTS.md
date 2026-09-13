@@ -1,4 +1,4 @@
-# RAD Protocol 3.0.0-alpha.3 Package Contents
+# RAD Protocol 3.0.0-beta.1 Package Contents
 
 `LICENSE` is intentionally not included in this upgrade package; keep the
 repository's existing GPL-3.0 license.

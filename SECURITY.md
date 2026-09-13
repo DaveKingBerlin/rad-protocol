@@ -17,12 +17,16 @@
 - OpenCode, Claude Code and Cursor remain TRUSTED-PROJECT ONLY.
 - SEC-001 is **FIXED** (at least one technically verified hostile-project
   backend + launcher refuses uncertified/uncertified-in-combination backend/
-  platform). SEC-002 and AGT-001 remain fixed (104/104 security regressions).
+  platform). SEC-002 and AGT-001 remain fixed; all committed security
+  regression tests pass.
 
 See [Secure Mode](docs/SECURE_MODE.md), the
-[runtime matrix](docs/RUNTIME_SUPPORT.md), the
-[trusted installation requirements](docs/TRUSTED_BASELINE.md) and the
-[Phase 2D report](docs/PHASE2D_REPORT.md).
+[runtime matrix](docs/RUNTIME_SUPPORT.md) and the
+[trusted installation requirements](docs/TRUSTED_BASELINE.md). Native
+certification evidence is carried by the permanent suites
+`tests/security/test_wsl_secure_backend.py` (WSL backend) and
+`tests/security/test_control_plane_guard.py` (windows guard); run them on a
+host with the `RAD-Secure-Test` distribution present.
 
 The launcher refuses uncertified backend/platform combinations. Job Object
 teardown and the independent baseline/structured file broker have regression
@@ -52,7 +56,18 @@ Phase 4 remediated the independent Phase 3 findings PH3-001..PH3-009:
 
 Codex WSL2 remains **SUPPORTED only** with the pinned tuple (Codex 0.153.4
 linux-x64, SHA-256 enforced, distro `RAD-Secure-Test`); the launcher refuses
-startup without the independent binary pin. See `docs/PHASE4_REPORT.md`.
+startup without the independent binary pin. Each PH3 remediation is covered
+by a named native regression in `tests/security/test_control_plane_guard.py`
+and `tests/security/test_wsl_secure_backend.py`.
+
+### Certification vs CI
+
+Hosted CI cannot run the WSL certified backend (the dedicated distribution is
+absent), so the WSL tests **skip** there and are re-run natively at release
+time on a host with `RAD-Secure-Test` present. A skip is not a pass. GitHub
+Actions runs the portable security regressions (`ubuntu-latest`) and the
+Windows-native regressions (`windows-latest`); the workflow file itself is
+validated for YAML syntax on every run.
 
 ## Reporting a vulnerability
 

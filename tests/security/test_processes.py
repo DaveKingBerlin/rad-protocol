@@ -424,5 +424,42 @@ class WindowsProcessOwnershipTests(unittest.TestCase):
         self.assertEqual((1, 0), (removed, retained))
 
 
+@unittest.skipUnless(os.name == "nt", "Windows ACL enforcement")
+class ProcessTrustKeyAclTests(unittest.TestCase):
+    """P1-6: the process trust key and state directory must be restricted to
+    the owning principal (plus SYSTEM/Administrators)."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="rad-process-acl-")
+        self.base = Path(self.temporary.name).resolve()
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def test_state_directory_and_key_hardened(self):
+        project = self.base / "project"
+        project.mkdir()
+        state = self.base / "state"
+        key = state / "trust.key"
+        state.mkdir()
+        key.write_bytes(secrets.token_bytes(32))
+        processes.validate_trusted_state_paths(project, state, key)
+        self.assertTrue(processes.state_directory_is_secure(state, key))
+
+    def test_broad_grant_fails_secure_check(self):
+        state = self.base / "state"
+        state.mkdir()
+        key = state / "trust.key"
+        self.assertTrue(processes._acl_has_no_broad_grants(state))
+        # Simulate an insecure (Everyone) grant on a throwaway file.
+        probe = state / "probe.txt"
+        probe.write_bytes(b"x")
+        import subprocess as _sp
+        _sp.run([processes._system32_tool("icacls.exe"), str(probe),
+                 "/grant", "*S-1-1-0:F"], check=True,
+                capture_output=True, text=True, errors="replace")
+        self.assertFalse(processes._acl_has_no_broad_grants(probe))
+
+
 if __name__ == "__main__":
     unittest.main()
