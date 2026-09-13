@@ -50,3 +50,6 @@ __pycache__/
 /Phase7.md
 /Phase7A.md
 /KimiK3ReviewReport.md
+
+#Sanity script
+publish-sanitized-history.ps1
