@@ -222,4 +222,11 @@ upgrade package intentionally does not replace the repository's existing
 *From requirements to validated software — autonomously, across runtimes.*
 # Security notice
 
-Direct runtime adapters are **TRUSTED-PROJECT ONLY**.
+Direct runtime adapters are TRUSTED-PROJECT ONLY.
+
+Hostile-project RAD Secure Mode is currently certified only for the pinned
+Codex CLI inside the dedicated hardened RAD-Secure-Test WSL2 environment.
+Native Windows Codex and OpenCode/Claude Code/Cursor remain
+TRUSTED-PROJECT ONLY.
+
+See Secure Mode and the runtime capability matrix.
