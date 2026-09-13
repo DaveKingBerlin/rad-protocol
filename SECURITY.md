@@ -71,10 +71,7 @@ validated for YAML syntax on every run.
 
 ## Reporting a vulnerability
 
-While the repository is private, report security issues directly to the repository owner.
-
-Before the project is made public, configure a private vulnerability-reporting
-channel or GitHub private vulnerability reporting.
+While the repository is public, report security issues directly to the repository owner.
 
 Please do not place exploit details, credentials, private source documents or
 sensitive PoC data in public issues.
