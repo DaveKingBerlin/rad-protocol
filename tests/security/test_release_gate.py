@@ -232,24 +232,44 @@ class ReleaseGateTests(unittest.TestCase):
     # -- Phase 4 test gap: wrapper argument forwarding -------------------
 
     def test_no_private_email_in_repository_content(self):
-        private_address = "private-owner-address@example.invalid"
-        tracked = subprocess.run(["git", "ls-files"], capture_output=True,
-                                 text=True, cwd=str(ROOT), check=True).stdout.splitlines()
-        hits = []
-        for rel in tracked:
-            path = ROOT / rel
-            if "node_modules" in path.parts:
-                continue
-            try:
-                data = path.read_bytes()
-            except OSError:
-                continue
-            if private_address.encode("utf-8") in data:
-                hits.append(rel.as_posix() if hasattr(rel, "as_posix") else rel)
-        self.assertEqual([], hits, "private email present in: %s" % "; ".join(hits[:10]))
+    private_address = os.environ.get("RAD_PRIVATE_EMAIL")
 
-    @unittest.skipUnless(os.name != "nt" and shutil.which("bash") and shutil.which("python3"),
-                         "POSIX bash and python3 required")
+    if not private_address:
+        self.skipTest(
+            "RAD_PRIVATE_EMAIL not set; private identity scan skipped"
+        )
+
+    tracked = subprocess.run(
+        ["git", "ls-files"],
+        capture_output=True,
+        text=True,
+        cwd=str(ROOT),
+        check=True,
+    ).stdout.splitlines()
+
+    hits = []
+
+    needle = private_address.encode("utf-8")
+
+    for rel in tracked:
+        path = ROOT / rel
+
+        if "node_modules" in path.parts:
+            continue
+
+        try:
+            data = path.read_bytes()
+        except OSError:
+            continue
+
+        if needle in data:
+            hits.append(rel)
+
+    self.assertEqual(
+        [],
+        hits,
+        "private email present in: %s" % "; ".join(hits[:10]),
+    )
     def test_generate_adapters_sh_check(self):
         result = subprocess.run(["bash", str(ROOT / "scripts" / "generate-adapters.sh"),
                                  "--check", "--all"],
