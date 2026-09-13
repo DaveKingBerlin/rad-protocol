@@ -71,10 +71,11 @@ validated for YAML syntax on every run.
 
 ## Reporting a vulnerability
 
-While the repository is public, report security issues directly to the repository owner.
+Please report security vulnerabilities privately using GitHub Private
+Vulnerability Reporting.
 
-Please do not place exploit details, credentials, private source documents or
-sensitive PoC data in public issues.
+Please do not place exploit details, credentials, private source documents
+or sensitive PoC data in public issues.
 
 ## Autonomous-agent safety
 
