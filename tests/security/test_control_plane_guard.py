@@ -511,6 +511,24 @@ class ControlPlaneGuardAdversarialTests(unittest.TestCase):
         self.assertNotIn(str(missing), detail)
         self.assertEqual(b"", output.read_bytes())
 
+    def test_acl_capture_and_restore_do_not_depend_on_module_autoload(self):
+        target = self.base / "no-module-autoload"
+        target.mkdir()
+        empty_modules = self.base / "empty-module-path"
+        empty_modules.mkdir()
+        run_powershell = guard_module._powershell_command
+
+        def execute_without_autoload(script, stdin_text=None):
+            script = "$PSModuleAutoLoadingPreference = 'None'; " + script
+            return run_powershell(script, stdin_text=stdin_text)
+
+        with mock.patch.dict(os.environ, {"PSModulePath": str(empty_modules)}), \
+                mock.patch.object(guard_module, "_powershell_command",
+                                  side_effect=execute_without_autoload):
+            sddl = guard_module._acl_sddl(target)
+            guard_module._set_acl_sddl(target, sddl)
+            self.assertTrue(guard_module._acl_sddl(target).startswith("O:"))
+
     def test_acl_sddl_capture_reports_missing_output_fail_closed(self):
         def no_output(_path, output):
             output.unlink()

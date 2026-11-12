@@ -299,18 +299,30 @@ def _capture_acl_command(path: Path, output_path: Path) -> subprocess.CompletedP
     script = (
         "$ErrorActionPreference = 'Stop'; "
         "$p = %s; $f = %s; "
-        "try { "
+        "try { %s "
         "$sddl = (Get-Acl -LiteralPath $p -ErrorAction Stop).Sddl; "
         "if ([String]::IsNullOrWhiteSpace($sddl)) { "
         "throw [IO.InvalidDataException]::new('empty security descriptor') }; "
         "[IO.File]::WriteAllText($f, $sddl, "
-        "(New-Object Text.UTF8Encoding($false))) "
+        "([Text.UTF8Encoding]::new($false))) "
         "} catch { %s; exit 41 }"
         % (_powershell_utf8_value(str(path)),
            _powershell_utf8_value(str(output_path)),
+           _powershell_security_module_bootstrap(),
            _powershell_error_marker("capture"))
     )
     return _powershell_command(script)
+
+
+def _powershell_security_module_bootstrap() -> str:
+    """Import the pinned host's security module without module auto-loading."""
+    return (
+        "$PSModuleAutoLoadingPreference = 'None'; "
+        "$securityModule = $PSHOME + "
+        "'\\Modules\\Microsoft.PowerShell.Security\\"
+        "Microsoft.PowerShell.Security.psd1'; "
+        "Import-Module -Name $securityModule -ErrorAction Stop; "
+    )
 
 
 def _acl_sddl(path: Path) -> str:
@@ -386,17 +398,19 @@ def _set_acl_sddl(path: Path, sddl: str) -> None:
     # pipe payload is Base64 UTF-8 so Console input code pages cannot alter it.
     stdin_payload = base64.b64encode(sddl.encode("utf-8")).decode("ascii")
     script = (
-        "$ErrorActionPreference = 'Stop'; $p = %s; try { "
+        "$ErrorActionPreference = 'Stop'; $p = %s; try { %s "
         "$encodedSddl = [Console]::In.ReadToEnd(); "
         "$s = [Text.Encoding]::UTF8.GetString("
         "[Convert]::FromBase64String($encodedSddl)); "
         "if ([String]::IsNullOrWhiteSpace($s)) { "
         "throw [IO.InvalidDataException]::new('empty security descriptor') }; "
-        "$fs = New-Object System.Security.AccessControl.FileSecurity; "
+        "$fs = [System.Security.AccessControl.FileSecurity]::new(); "
         "$fs.SetSecurityDescriptorSddlForm($s); "
         "Set-Acl -LiteralPath $p -AclObject $fs -ErrorAction Stop "
         "} catch { %s; exit 42 }"
-        % (_powershell_utf8_value(absolute), _powershell_error_marker("restore"))
+        % (_powershell_utf8_value(absolute),
+           _powershell_security_module_bootstrap(),
+           _powershell_error_marker("restore"))
     )
     try:
         result = _powershell_command(script, stdin_text=stdin_payload)
