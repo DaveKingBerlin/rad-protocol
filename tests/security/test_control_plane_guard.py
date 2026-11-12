@@ -257,9 +257,9 @@ class ControlPlaneGuardAdversarialTests(unittest.TestCase):
                 [str(guard_module._system_root() / "System32" /
                      "WindowsPowerShell" / "v1.0" / "powershell.exe"),
                  "-NoProfile", "-NonInteractive", "-Command",
-                 "$ErrorActionPreference='Stop'; try { Set-Content "
-                 "-LiteralPath '%s' -Value 'HACKED' -ErrorAction Stop; "
-                 "exit 0 } catch { exit 23 }" % control],
+                 "$target = '%s'; try { "
+                 "[System.IO.File]::WriteAllText($target, 'HACKED'); "
+                 "exit 0 } catch { exit 23 }" % str(control).replace("'", "''")],
                 ["cmd", "/d", "/c", "echo HACKED>%s" % control],
             ):
                 with self.subTest(command=command[0]):
