@@ -15,9 +15,9 @@ agent instruction or file naming.
 
 Phase 4 hardening applied here:
 
-- PH3-001: helper executables (``icacls.exe``, ``powershell.exe``, …) are
-  resolved from canonical trusted system directories, never via PATH or the
-  current directory, so a repository-located executable cannot shadow them.
+- PH3-001: helper executables such as ``icacls.exe`` are resolved from the
+  canonical trusted system directory, never via PATH or the current directory.
+  Native ACL APIs are loaded from ``System32`` with restricted DLL search.
 - PH3-005: the deny masks explicitly cover `FILE_APPEND_DATA` (AD),
   `FILE_WRITE_ATTRIBUTES` (WA), `FILE_WRITE_EA` (WEA), `WRITE_DAC` (WDAC) and
   `WRITE_OWNER` (WO) in addition to write-data and delete, closing the
@@ -26,9 +26,10 @@ Phase 4 hardening applied here:
   baseline when available, and the immediate parent directory of every control
   leaf is locked (name-entry deny) so replacement/rename-over of protected
   files below ordinary product directories is denied as well.
-- PH3-009: the exact original security descriptor (SDDL) of every guarded path
-  is captured before modification and restored byte-equivalently afterwards;
-  restore never relies on removing "all Everyone deny ACEs".
+- PH3-009: the exact owner, group and ordered DACL ACEs of every guarded path
+  are captured before modification and restored afterwards; restore never
+  relies on removing "all Everyone deny ACEs". Windows recalculates the
+  auto-inherited descriptor control bit when writing an ACL.
 
 The guard is defense-in-depth.  The durable authority boundary in deployment is
 a separate OS principal that does not own the control material, plus the
@@ -40,15 +41,13 @@ under a different, non-owning principal (a certified backend requirement).
 
 from __future__ import annotations
 
-import base64
 import ctypes
+from functools import lru_cache
 import json
 import os
 from pathlib import Path
-import re
 import stat
 import subprocess
-import tempfile
 from typing import Iterable, List, Optional, Tuple
 
 from .baseline import TrustedBaseline
@@ -113,15 +112,13 @@ def _system_tool(name: str) -> str:
 
 
 _ICACLS = None
-_POWERSHELL = None
 
 
-def _resolve_tools() -> Tuple[str, str]:
-    global _ICACLS, _POWERSHELL
-    if _ICACLS is None or _POWERSHELL is None:
+def _resolve_tools() -> str:
+    global _ICACLS
+    if _ICACLS is None:
         _ICACLS = _system_tool("icacls.exe")
-        _POWERSHELL = _system_tool("WindowsPowerShell/v1.0/powershell.exe")
-    return _ICACLS, _POWERSHELL
+    return _ICACLS
 
 
 def _is_locked_out(part: str) -> bool:
@@ -221,7 +218,7 @@ def control_plane_entries(project_root, protected_relative: Optional[Iterable[st
 
 
 def _icacls(*arguments) -> None:
-    tool, _ = _resolve_tools()
+    tool = _resolve_tools()
     process = subprocess.run(
         [tool] + [str(argument) for argument in arguments],
         stdout=subprocess.PIPE,
@@ -233,193 +230,197 @@ def _icacls(*arguments) -> None:
         raise GuardError("icacls failed (%s)" % process.stdout.strip()[-200:])
 
 
-def _powershell_command(script: str,
-                        stdin_text: Optional[str] = None) -> subprocess.CompletedProcess:
-    """PH3-001: run a PowerShell command via absolute pinned executable.
-
-    The script is passed through `-EncodedCommand` (Base64 of UTF-16LE) so no
-    shell quoting of project paths can occur.
-    """
-    _, tool = _resolve_tools()
-    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
-    return subprocess.run(
-        [tool, "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
-        input=stdin_text,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        errors="replace",
-    )
+_OWNER_SECURITY_INFORMATION = 0x00000001
+_GROUP_SECURITY_INFORMATION = 0x00000002
+_DACL_SECURITY_INFORMATION = 0x00000004
+_PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000
+_UNPROTECTED_DACL_SECURITY_INFORMATION = 0x20000000
+_SE_DACL_PROTECTED = 0x1000
+_SECURITY_DESCRIPTOR_REVISION = 1
+_ERROR_INSUFFICIENT_BUFFER = 122
 
 
-def _powershell_utf8_value(value: str) -> str:
-    """Return a PowerShell expression that reconstructs opaque UTF-8 data."""
-    encoded = base64.b64encode(value.encode("utf-8")).decode("ascii")
-    return ("[Text.Encoding]::UTF8.GetString("
-            "[Convert]::FromBase64String('%s'))" % encoded)
+def _security_error(operation: str, error_code: Optional[int] = None) -> GuardError:
+    """Return a bounded native API diagnostic without paths or descriptor data."""
+    if error_code is None:
+        error_code = ctypes.get_last_error()
+    categories = {
+        2: "FileNotFound",
+        3: "PathNotFound",
+        5: "AccessDenied",
+        87: "InvalidParameter",
+        122: "InsufficientBuffer",
+    }
+    category = categories.get(error_code, "Win32Error")
+    return GuardError("%s failed: category=%s winerror=%s" %
+                      (operation, category, error_code))
 
 
-def _powershell_error_marker(operation: str) -> str:
-    """Return a catch block that emits bounded, non-sensitive diagnostics."""
-    marker = "RAD_ACL_%s_ERROR" % operation.upper()
-    return (
-        "$category = if ($_.CategoryInfo) { [string]$_.CategoryInfo.Category } "
-        "else { 'NotSpecified' }; "
-        "$identifier = if ($_.FullyQualifiedErrorId) { "
-        "[string]$_.FullyQualifiedErrorId } else { "
-        "$_.Exception.GetType().FullName }; "
-        "$category = $category -replace '[^A-Za-z0-9_.-]', '_'; "
-        "$identifier = $identifier -replace '[^A-Za-z0-9_.,-]', '_'; "
-        "[Console]::Error.WriteLine('%s category={0} id={1}', "
-        "$category, $identifier)" % marker
-    )
+@lru_cache(maxsize=1)
+def _security_apis():
+    """Load native ACL APIs from the trusted Windows system directory."""
+    from ctypes import wintypes
+
+    advapi_path = _system_dll("advapi32.dll")
+    if not advapi_path.is_file():
+        raise GuardError("trusted Windows security API is missing")
+    advapi = ctypes.WinDLL(str(advapi_path), use_last_error=True,
+                           winmode=0x00000800)  # LOAD_LIBRARY_SEARCH_SYSTEM32
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi.GetFileSecurityW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, ctypes.c_void_p,
+        wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
+    ]
+    advapi.GetFileSecurityW.restype = wintypes.BOOL
+    advapi.ConvertSecurityDescriptorToStringSecurityDescriptorW.argtypes = [
+        ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD,
+        ctypes.POINTER(wintypes.LPWSTR), ctypes.POINTER(wintypes.DWORD),
+    ]
+    advapi.ConvertSecurityDescriptorToStringSecurityDescriptorW.restype = wintypes.BOOL
+    advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = wintypes.BOOL
+    advapi.GetSecurityDescriptorControl.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(wintypes.WORD),
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    advapi.GetSecurityDescriptorControl.restype = wintypes.BOOL
+    advapi.SetFileSecurityW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, ctypes.c_void_p,
+    ]
+    advapi.SetFileSecurityW.restype = wintypes.BOOL
+    kernel.LocalFree.argtypes = [wintypes.HLOCAL]
+    kernel.LocalFree.restype = wintypes.HLOCAL
+    return advapi, kernel
 
 
-def _powershell_failure_detail(result: subprocess.CompletedProcess) -> str:
-    """Describe a helper failure without echoing paths, SDDL or other output."""
-    marker = re.search(
-        r"RAD_ACL_(?:CAPTURE|RESTORE)_ERROR "
-        r"category=[A-Za-z0-9_.-]+ id=[A-Za-z0-9_.,-]+",
-        result.stdout or "",
-    )
-    category = marker.group(0) if marker else "category=unreported"
-    return "exit=%s; %s" % (result.returncode, category)
+def _system_dll(name: str) -> Path:
+    """Return a trusted DLL path under the resolved Windows System32."""
+    return _system_root() / "System32" / name
 
 
-def _powershell_launch_failure_detail(error: OSError) -> str:
-    """Describe process creation failure without echoing command/path details."""
-    category = type(error).__name__
-    code = getattr(error, "winerror", None)
-    if code is None:
-        code = getattr(error, "errno", None)
-    return "launch-error=%s; code=%s" % (category, code)
+def _capture_security_descriptor_sddl(path: Path) -> str:
+    """Capture the owner, group and DACL with native APIs (no temp files)."""
+    advapi, kernel = _security_apis()
+    security_information = (_OWNER_SECURITY_INFORMATION
+                           | _GROUP_SECURITY_INFORMATION
+                           | _DACL_SECURITY_INFORMATION)
+    required = ctypes.c_uint32(0)
+    ctypes.set_last_error(0)
+    advapi.GetFileSecurityW(str(path), security_information, None, 0,
+                           ctypes.byref(required))
+    if ctypes.get_last_error() != _ERROR_INSUFFICIENT_BUFFER or not required.value:
+        raise _security_error("GetFileSecurityW")
+    descriptor = ctypes.create_string_buffer(required.value)
+    received = ctypes.c_uint32(0)
+    if not advapi.GetFileSecurityW(str(path), security_information, descriptor,
+                                  required.value, ctypes.byref(received)):
+        raise _security_error("GetFileSecurityW")
+    if not received.value or received.value > required.value:
+        raise GuardError("GetFileSecurityW returned an invalid descriptor size")
 
-
-def _capture_acl_command(path: Path, output_path: Path) -> subprocess.CompletedProcess:
-    script = (
-        "$ErrorActionPreference = 'Stop'; "
-        "$p = %s; $f = %s; "
-        "try { %s "
-        "$sddl = (Get-Acl -LiteralPath $p -ErrorAction Stop).Sddl; "
-        "if ([String]::IsNullOrWhiteSpace($sddl)) { "
-        "throw [IO.InvalidDataException]::new('empty security descriptor') }; "
-        "[IO.File]::WriteAllText($f, $sddl, "
-        "([Text.UTF8Encoding]::new($false))) "
-        "} catch { %s; exit 41 }"
-        % (_powershell_utf8_value(str(path)),
-           _powershell_utf8_value(str(output_path)),
-           _powershell_security_module_bootstrap(),
-           _powershell_error_marker("capture"))
-    )
-    return _powershell_command(script)
-
-
-def _powershell_security_module_bootstrap() -> str:
-    """Import the pinned host's security module without module auto-loading."""
-    return (
-        "$PSModuleAutoLoadingPreference = 'None'; "
-        "$securityModule = $PSHOME + "
-        "'\\Modules\\Microsoft.PowerShell.Security\\"
-        "Microsoft.PowerShell.Security.psd1'; "
-        "Import-Module -Name $securityModule -ErrorAction Stop; "
-    )
-
-
-def _acl_sddl(path: Path) -> str:
-    """PH3-009: capture the exact owner/group/DACL of a path as SDDL.
-
-    The SDDL is written to a pre-created file in a private temporary directory
-    by the pinned PowerShell and read back by Python, avoiding PowerShell's
-    redirected-stdout CLIXML serialization entirely.  PowerShell errors are
-    terminating and reduced to a category marker; SDDL is never logged.
-    """
-    absolute = Path(path).resolve(strict=True)
-    with tempfile.TemporaryDirectory(prefix="rad-acl-") as directory:
-        tmp = Path(directory) / "descriptor.sddl"
-        # Prove the directory is writable before invoking PowerShell and avoid
-        # asking the child process to create a new name in a shared temp root.
-        with tmp.open("xb"):
-            pass
-        original = tmp.lstat()
-        try:
-            result = _capture_acl_command(absolute, tmp)
-        except OSError as error:
-            raise GuardError(
-                "cannot capture security descriptor for %s: %s; output=untrusted"
-                % (path, _powershell_launch_failure_detail(error))) from error
-        if result.returncode != 0:
-            raise GuardError(
-                "cannot capture security descriptor for %s: %s; output=untrusted"
-                % (path, _powershell_failure_detail(result)))
-        if not tmp.exists():
-            raise GuardError(
-                "cannot capture security descriptor for %s: exit=0; output=missing"
-                % path)
-        info = tmp.lstat()
-        if not stat.S_ISREG(info.st_mode):
-            raise GuardError(
-                "cannot capture security descriptor for %s: exit=0; "
-                "output=not-regular" % path)
-        if info.st_nlink != 1:
-            raise GuardError(
-                "cannot capture security descriptor for %s: exit=0; "
-                "output=multiple-links" % path)
-        if getattr(info, "st_file_attributes", 0) & _REPARSE_FLAG:
-            raise GuardError(
-                "cannot capture security descriptor for %s: exit=0; "
-                "output=reparse" % path)
-        if (info.st_dev, info.st_ino) != (original.st_dev, original.st_ino):
-            raise GuardError(
-                "cannot capture security descriptor for %s: exit=0; "
-                "output=replaced" % path)
-        try:
-            payload = tmp.read_bytes()
-            sddl = payload.decode("utf-8-sig", errors="strict").strip()
-        except UnicodeDecodeError as error:
-            raise GuardError(
-                "cannot capture security descriptor for %s: exit=0; "
-                "output=invalid-encoding" % path) from error
-    if not payload:
-        raise GuardError(
-            "cannot capture security descriptor for %s: exit=0; output=empty"
-            % path)
+    sddl_pointer = ctypes.c_wchar_p()
+    sddl_length = ctypes.c_uint32(0)
+    try:
+        if not advapi.ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                descriptor, _SECURITY_DESCRIPTOR_REVISION,
+                security_information, ctypes.byref(sddl_pointer),
+                ctypes.byref(sddl_length)):
+            raise _security_error("ConvertSecurityDescriptorToStringSecurityDescriptorW")
+        sddl = sddl_pointer.value
+    finally:
+        if sddl_pointer:
+            kernel.LocalFree(ctypes.cast(sddl_pointer, ctypes.c_void_p))
     if not sddl or not sddl.startswith("O:"):
-        raise GuardError(
-            "cannot capture security descriptor for %s: exit=0; "
-            "output=invalid-sddl" % path)
+        raise GuardError("security descriptor conversion returned empty or invalid SDDL")
     return sddl
 
 
-def _set_acl_sddl(path: Path, sddl: str) -> None:
-    absolute = str(Path(path).resolve(strict=True))
-    # SDDL can be large.  Transport it through the anonymous stdin pipe rather
-    # than embedding it in the already Base64-encoded PowerShell command, which
-    # would hit Windows' 32,767-character process command-line limit.  The
-    # pipe payload is Base64 UTF-8 so Console input code pages cannot alter it.
-    stdin_payload = base64.b64encode(sddl.encode("utf-8")).decode("ascii")
-    script = (
-        "$ErrorActionPreference = 'Stop'; $p = %s; try { %s "
-        "$encodedSddl = [Console]::In.ReadToEnd(); "
-        "$s = [Text.Encoding]::UTF8.GetString("
-        "[Convert]::FromBase64String($encodedSddl)); "
-        "if ([String]::IsNullOrWhiteSpace($s)) { "
-        "throw [IO.InvalidDataException]::new('empty security descriptor') }; "
-        "$fs = [System.Security.AccessControl.FileSecurity]::new(); "
-        "$fs.SetSecurityDescriptorSddlForm($s); "
-        "Set-Acl -LiteralPath $p -AclObject $fs -ErrorAction Stop "
-        "} catch { %s; exit 42 }"
-        % (_powershell_utf8_value(absolute),
-           _powershell_security_module_bootstrap(),
-           _powershell_error_marker("restore"))
-    )
+def _acl_sddl(path: Path) -> str:
+    """PH3-009: capture the exact owner/group/DACL as SDDL, failing closed."""
     try:
-        result = _powershell_command(script, stdin_text=stdin_payload)
+        absolute = Path(path).resolve(strict=True)
+        return _capture_security_descriptor_sddl(absolute)
+    except GuardError:
+        raise
     except OSError as error:
-        raise GuardError("cannot restore security descriptor for %s: %s"
-                         % (path, _powershell_launch_failure_detail(error))) from error
-    if result.returncode != 0:
-        raise GuardError("cannot restore security descriptor for %s: %s"
-                         % (path, _powershell_failure_detail(result)))
+        raise GuardError("cannot capture security descriptor: category=%s" %
+                         type(error).__name__) from error
+
+
+def _restore_security_descriptor_sddl(path: Path, sddl: str) -> None:
+    """Restore an SDDL snapshot with the native Windows security API."""
+    from ctypes import wintypes
+
+    if not isinstance(sddl, str) or not sddl or not sddl.startswith("O:"):
+        raise GuardError("cannot restore security descriptor: invalid SDDL")
+    advapi, kernel = _security_apis()
+    descriptor = ctypes.c_void_p()
+    descriptor_size = wintypes.DWORD(0)
+    if not advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl, _SECURITY_DESCRIPTOR_REVISION,
+            ctypes.byref(descriptor), ctypes.byref(descriptor_size)):
+        raise _security_error("ConvertStringSecurityDescriptorToSecurityDescriptorW")
+    try:
+        control = wintypes.WORD(0)
+        revision = wintypes.DWORD(0)
+        if not advapi.GetSecurityDescriptorControl(
+                descriptor, ctypes.byref(control), ctypes.byref(revision)):
+            raise _security_error("GetSecurityDescriptorControl")
+        security_information = (_OWNER_SECURITY_INFORMATION
+                               | _GROUP_SECURITY_INFORMATION
+                               | _DACL_SECURITY_INFORMATION)
+        if control.value & _SE_DACL_PROTECTED:
+            security_information |= _PROTECTED_DACL_SECURITY_INFORMATION
+        else:
+            security_information |= _UNPROTECTED_DACL_SECURITY_INFORMATION
+        # SetFileSecurityW writes the captured DACL without propagating a
+        # parent's inheritable ACEs through the tree. SetNamedSecurityInfoW
+        # does propagate them, which can add inherited ACEs absent from the
+        # snapshot and make an exact rollback impossible.
+        if not advapi.SetFileSecurityW(str(path), security_information, descriptor):
+            raise _security_error("SetFileSecurityW")
+    finally:
+        if descriptor:
+            kernel.LocalFree(descriptor)
+
+
+def _set_acl_sddl(path: Path, sddl: str) -> None:
+    """Restore and verify the exact original owner/group/DACL snapshot."""
+    try:
+        absolute = Path(path).resolve(strict=True)
+        _restore_security_descriptor_sddl(absolute, sddl)
+        actual = _capture_security_descriptor_sddl(absolute)
+        if not _same_restored_acl(sddl, actual):
+            raise GuardError("restored ACL does not match captured owner/group/DACL")
+    except GuardError:
+        raise
+    except OSError as error:
+        raise GuardError("cannot restore security descriptor: category=%s" %
+                         type(error).__name__) from error
+
+
+def _same_restored_acl(expected: str, actual: str) -> bool:
+    """Compare the full SDDL except Windows' recalculated auto-inherited bit.
+
+    SetFileSecurityW restores the owner, group and ordered DACL ACEs exactly,
+    but Windows recalculates SE_DACL_AUTO_INHERITED when it writes the
+    descriptor. That control bit is normalized here; ACE inheritance flags,
+    DACL protection, owner/group SIDs and ACE order remain part of the compare.
+    """
+    def without_auto_inherited(value: str) -> str:
+        dacl_start = value.find("D:")
+        if dacl_start < 0:
+            return value
+        first_ace = value.find("(", dacl_start + 2)
+        if first_ace < 0:
+            first_ace = len(value)
+        flags = value[dacl_start + 2:first_ace].replace("AI", "")
+        return value[:dacl_start + 2] + flags + value[first_ace:]
+
+    return without_auto_inherited(expected) == without_auto_inherited(actual)
 
 
 def _deny_for(entry: Path) -> str:
@@ -539,12 +540,12 @@ class ControlPlaneGuard:
         with lock_control_plane(project) as guard:
             guard.verify()   # raises unless truly denied at the OS boundary
             ... run the runtime / descendants ...
-        # exiting restores the exact original security descriptors.
+        # exiting restores the exact original owner/group/ordered DACL ACEs.
 
     Phase 4: the original SDDL of every guarded path is captured before the
-    guard is applied and restored exactly afterwards (PH3-009); protected
-    leaves below ordinary directories have their immediate parent locked so
-    replacement is denied (PH3-006).
+    guard is applied and its owner/group/ordered DACL ACEs are restored exactly
+    afterwards (PH3-009); protected leaves below ordinary directories have
+    their immediate parent locked so replacement is denied (PH3-006).
     """
 
     def __init__(self, project_root, protected_relative: Optional[Iterable[str]] = None):
@@ -592,7 +593,7 @@ class ControlPlaneGuard:
                 _icacls(entry, "/deny", _DENY_EVERYONE + ":" + deny)
                 applied.append(entry)
         except Exception as error:
-            # Best-effort fail-closed rollback: restore exact SDDLs.
+            # Best-effort fail-closed rollback: restore every captured ACL.
             for entry, sddl in reversed(snapshots):
                 try:
                     _set_acl_sddl(entry, sddl)
@@ -640,7 +641,7 @@ class ControlPlaneGuard:
                 pass
 
     def restore(self) -> None:
-        """PH3-009: restore the exact original security descriptors."""
+        """PH3-009: restore the exact original owner/group/DACL ACEs."""
         failures = []
         for entry, sddl in reversed(self._snapshots):
             try:

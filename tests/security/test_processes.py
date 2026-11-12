@@ -592,6 +592,26 @@ class ProcessTrustKeyAclTests(unittest.TestCase):
                     key, directory=False, expected=key.stat()):
                 self.fail("key identity hold unexpectedly admitted a writer")
 
+    def test_path_identity_handle_closes_when_validation_fails(self):
+        state = self.base / "state"
+        state.mkdir()
+        key = state / "trust.key"
+        key.write_bytes(secrets.token_bytes(32))
+        kernel = mock.Mock()
+        kernel.CreateFileW.return_value = 1234
+
+        with mock.patch.object(processes.ctypes, "WinDLL", return_value=kernel), \
+                mock.patch.object(processes.os.path, "samestat",
+                                  return_value=False), \
+                self.assertRaisesRegex(
+                    processes.ProcessSecurityError,
+                    "path changed during validation"):
+            with processes._hold_path_identity(
+                    key, directory=False, expected=key.stat()):
+                self.fail("changed path identity unexpectedly admitted")
+
+        kernel.CloseHandle.assert_called_once_with(1234)
+
     def test_key_outside_state_is_rejected(self):
         project = self.base / "project"
         project.mkdir()
