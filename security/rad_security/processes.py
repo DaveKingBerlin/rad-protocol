@@ -11,6 +11,7 @@ PID-directed termination.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager, nullcontext
 import ctypes
 from ctypes import wintypes
 import hashlib
@@ -104,7 +105,74 @@ def _is_relative_to(path: Path, parent: Path) -> bool:
         return False
 
 
-def validate_trusted_state_paths(project: Path, state_directory: Path, key_file: Path) -> tuple[Path, Path]:
+def _same_existing_directory(left: Path, right: Path) -> bool:
+    """Compare existing directories by filesystem identity, not spelling.
+
+    Windows can expose one directory through different case, separator, or
+    short/long-name spellings.  ``normcase`` alone cannot prove identity, while
+    ``samefile`` compares the underlying directory objects.  Both inputs have
+    already passed ``canonical_directory`` so reparse points are rejected.
+    """
+    try:
+        return os.path.samefile(left, right)
+    except OSError as exc:
+        raise ProcessSecurityError(
+            "cannot prove trusted process directory identity") from exc
+
+
+@contextmanager
+def _hold_path_identity(path: Path, *, directory: bool,
+                        expected: os.stat_result | None = None):
+    """Hold an existing Windows path open without delete sharing.
+
+    The pre/post ``stat`` comparison detects replacement between validation and
+    handle acquisition.  Once acquired, omitting ``FILE_SHARE_DELETE`` blocks
+    rename/delete replacement until the security-sensitive path operations are
+    complete.  This is intentionally a Windows-only primitive.
+    """
+    before = expected if expected is not None else path.stat()
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD,
+                                   wintypes.DWORD, ctypes.c_void_p,
+                                   wintypes.DWORD, wintypes.DWORD,
+                                   wintypes.HANDLE]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    FILE_READ_ATTRIBUTES = 0x0080
+    GENERIC_READ = 0x80000000
+    FILE_SHARE_READ = 0x00000001
+    FILE_SHARE_WRITE = 0x00000002
+    OPEN_EXISTING = 3
+    FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+    flags = FILE_FLAG_BACKUP_SEMANTICS if directory else 0
+    # Directories need write sharing so ACL tools and metadata creation can
+    # operate below the held directory.  A key file must not share write
+    # access: otherwise a second process could truncate or overwrite its bytes
+    # in place without replacing the file identity.
+    share_mode = (FILE_SHARE_READ | FILE_SHARE_WRITE
+                  if directory else FILE_SHARE_READ)
+    desired_access = FILE_READ_ATTRIBUTES if directory else GENERIC_READ
+    handle = kernel.CreateFileW(
+        str(path), desired_access, share_mode,
+        None, OPEN_EXISTING, flags, None)
+    invalid = wintypes.HANDLE(-1).value
+    if handle == invalid:
+        raise ProcessSecurityError(
+            "cannot lock trusted process path identity")
+    try:
+        after = path.stat()
+        if not os.path.samestat(before, after):
+            raise ProcessSecurityError(
+                "trusted process path changed during validation")
+        yield
+    finally:
+        kernel.CloseHandle(handle)
+
+
+@contextmanager
+def _validated_trusted_state_paths(project: Path, state_directory: Path,
+                                   key_file: Path):
     project = canonical_directory(project)
     if not state_directory.is_absolute() or not key_file.is_absolute():
         raise ProcessSecurityError("state and key paths must be absolute")
@@ -115,29 +183,76 @@ def validate_trusted_state_paths(project: Path, state_directory: Path, key_file:
     # link or an unresolved parent supplied in process routing metadata.
     parent = canonical_directory(state_directory.parent)
     state = parent / state_directory.name
-    key = key_file
+    key_parent = key_file.parent
+
+    if state_directory.exists() or state_directory.is_symlink():
+        # For an existing state directory compare the actual directory objects.
+        # This accepts equivalent case and 8.3/long-name spellings, while
+        # canonical_directory still rejects every reparse-point component.
+        state = canonical_directory(state_directory)
+        canonical_key_parent = canonical_directory(key_parent)
+        if not _same_existing_directory(state, canonical_key_parent):
+            raise ProcessSecurityError(
+                "the process trust key must be directly inside the trusted state directory")
+    else:
+        # Before creating a missing final state component, prove that the key
+        # parent requests the same direct child of the same on-disk parent.
+        # Filesystem identity protects the existing parent; the final name must
+        # be compared lexically because that directory does not exist yet.
+        key_parent_parent = canonical_directory(key_parent.parent)
+        if (not _same_existing_directory(parent, key_parent_parent)
+                or os.path.normcase(key_parent.name)
+                != os.path.normcase(state_directory.name)):
+            raise ProcessSecurityError(
+                "the process trust key must be directly inside the trusted state directory")
+
     project_norm = Path(os.path.normcase(str(project)))
     state_norm = Path(os.path.normcase(str(state)))
-    key_norm = Path(os.path.normcase(str(key)))
+    key_norm = Path(os.path.normcase(str(state / key_file.name)))
     if _is_relative_to(state_norm, project_norm) or _is_relative_to(key_norm, project_norm):
         raise ProcessSecurityError("trusted process state and key must be outside the untrusted project")
-    if Path(os.path.normcase(str(key.parent))) != state_norm:
-        raise ProcessSecurityError("the process trust key must be directly inside the trusted state directory")
     if not state.exists():
         state.mkdir(mode=0o700)
     state = canonical_directory(state)
-    if key.exists() or key.is_symlink():
-        _require_regular_single_link(key)
-    # P1-6: the trust key and metadata must be reachable only by the owning
-    # principal (plus SYSTEM/Administrators).  Other principals (local users,
-    # service/sandbox accounts) must not read them.  Fail closed, never silently
-    # proceed with a broad ACL.
-    harden_state_directory(state, key)
-    if not state_directory_is_secure(state, key):
-        raise ProcessSecurityError(
-            "process state/trust key are not restricted to the owning principal; "
-            "refusing to continue with an unprotected ACL")
-    return state, key
+    state_identity = state.stat()
+
+    # Hold the directory without delete sharing from the final identity proof
+    # through ACL hardening.  This closes the check/use window in which another
+    # process could otherwise rename the directory and replace it with a link.
+    with _hold_path_identity(state, directory=True, expected=state_identity):
+        canonical_key_parent = canonical_directory(key_parent)
+        if not _same_existing_directory(state, canonical_key_parent):
+            raise ProcessSecurityError(
+                "the process trust key must be directly inside the trusted state directory")
+        key = state / key_file.name
+
+        # An existing key is held without delete sharing as well, preventing a
+        # rename-over between link-count validation and its ACL verification.
+        key_exists = key.exists() or key.is_symlink()
+        key_context = (_hold_path_identity(key, directory=False,
+                                           expected=key.stat())
+                       if key_exists else nullcontext())
+        with key_context:
+            if key_exists:
+                _require_regular_single_link(key)
+            harden_state_directory(state, key)
+            secure = state_directory_is_secure(state, key)
+            if not secure:
+                raise ProcessSecurityError(
+                    "process state/trust key are not restricted to the owning principal; "
+                    "refusing to continue with an unprotected ACL")
+            yield state, key
+
+
+def validate_trusted_state_paths(project: Path, state_directory: Path,
+                                 key_file: Path) -> tuple[Path, Path]:
+    """Validate and harden trusted paths for callers that need paths only.
+
+    Security-sensitive key consumers use ``_load_validated_trusted_key`` so
+    the state/key handles remain held through the actual key read or creation.
+    """
+    with _validated_trusted_state_paths(project, state_directory, key_file) as paths:
+        return paths
 
 
 def _system32_tool(name: str) -> str:
@@ -319,26 +434,66 @@ def load_or_create_key(path: Path) -> bytes:
         finally:
             os.close(fd)
     try:
-        _require_regular_single_link(path)
-        with path.open("rb") as handle:
-            key = handle.read(33)
-    except OSError as exc:
+        return load_key(path)
+    except ProcessSecurityError as exc:
         raise ProcessSecurityError("unable to read the trusted process key") from exc
-    if len(key) != 32:
-        raise ProcessSecurityError("trusted process key has an invalid length")
-    return key
 
 
 def load_key(path: Path) -> bytes:
+    # Re-canonicalize the parent and hold the key without delete sharing while
+    # validating and reading it.  This prevents rename-over between the
+    # regular/single-link check and the read itself.  The separately hardened
+    # state directory remains the authority boundary between validation calls.
+    parent = canonical_directory(path.parent)
+    path = parent / path.name
     try:
-        _require_regular_single_link(path)
-        with path.open("rb") as handle:
-            key = handle.read(33)
+        identity = path.stat()
+        with _hold_path_identity(path, directory=False, expected=identity):
+            _require_regular_single_link(path)
+            with path.open("rb") as handle:
+                key = handle.read(33)
     except OSError as exc:
         raise ProcessSecurityError("trusted process key is unavailable") from exc
     if len(key) != 32:
         raise ProcessSecurityError("trusted process key has an invalid length")
     return key
+
+
+def _load_validated_trusted_key(*, project: Path, state_directory: Path,
+                                key_file: Path, create: bool,
+                                ) -> tuple[Path, Path, bytes]:
+    """Bind trusted-path validation, ACL proof and key bytes continuously.
+
+    The state handle stays open without delete sharing for the whole operation.
+    After an optional create/read, the exact key is locked, hardened, checked,
+    and read again.  A replacement between provisional load and final binding
+    therefore fails closed instead of changing the authenticated key material.
+    """
+    with _validated_trusted_state_paths(
+            project, state_directory, key_file) as (state, key_path):
+        provisional = (load_or_create_key(key_path) if create else None)
+        try:
+            identity = key_path.stat()
+        except OSError as exc:
+            raise ProcessSecurityError(
+                "trusted process key is unavailable") from exc
+        with _hold_path_identity(key_path, directory=False, expected=identity):
+            _require_regular_single_link(key_path)
+            harden_state_directory(state, key_path)
+            if not state_directory_is_secure(state, key_path):
+                raise ProcessSecurityError(
+                    "process state/trust key are not restricted to the owning principal; "
+                    "refusing to continue with an unprotected ACL")
+            with key_path.open("rb") as handle:
+                key = handle.read(33)
+            if len(key) != 32:
+                raise ProcessSecurityError(
+                    "trusted process key has an invalid length")
+            if provisional is not None and not hmac.compare_digest(
+                    provisional, key):
+                raise ProcessSecurityError(
+                    "trusted process key changed during validation")
+            return state, key_path, key
 
 
 def _canonical_json(value: Mapping[str, Any]) -> bytes:
@@ -864,8 +1019,9 @@ def _control_request(payload: Mapping[str, Any], operation: str, timeout: float 
 
 
 def stop_run(*, project: Path, port: int, state_directory: Path, key_file: Path, timeout: float = 5.0) -> dict[str, Any]:
-    state, key_path = validate_trusted_state_paths(project, state_directory, key_file)
-    key = load_key(key_path)
+    state, key_path, key = _load_validated_trusted_key(
+        project=project, state_directory=state_directory,
+        key_file=key_file, create=False)
     path = metadata_path(state, project_identifier(project), port)
     payload = read_metadata(path, key, expected_project=project, expected_port=port)
     if payload["state"] not in {"starting", "ready"}:
@@ -883,8 +1039,9 @@ def stop_run(*, project: Path, port: int, state_directory: Path, key_file: Path,
 
 def cleanup_state(*, project: Path, state_directory: Path, key_file: Path) -> tuple[int, int]:
     """Remove authenticated stale records. Never terminate a process."""
-    state, key_path = validate_trusted_state_paths(project, state_directory, key_file)
-    key = load_key(key_path)
+    state, key_path, key = _load_validated_trusted_key(
+        project=project, state_directory=state_directory,
+        key_file=key_file, create=False)
     prefix = f"run-{project_identifier(project)[:24]}-"
     removed = 0
     retained = 0
@@ -920,8 +1077,9 @@ def _guardian(
     startup_timeout: float,
     environment_entries: Sequence[str],
 ) -> int:
-    state, key_path = validate_trusted_state_paths(project, state_directory, key_file)
-    key = load_key(key_path)
+    state, key_path, key = _load_validated_trusted_key(
+        project=project, state_directory=state_directory,
+        key_file=key_file, create=False)
     path = metadata_path(state, project_identifier(project), port)
     control = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     control.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
@@ -1080,8 +1238,11 @@ def start_run(arguments: argparse.Namespace) -> dict[str, Any]:
     working = canonical_directory(arguments.working_directory)
     if not _is_relative_to(Path(os.path.normcase(str(working))), Path(os.path.normcase(str(project)))):
         raise ProcessSecurityError("working directory must be within the project")
-    state, key_path = validate_trusted_state_paths(project, Path(arguments.state_directory), Path(arguments.trust_key_file))
-    key = load_or_create_key(key_path)
+    state, key_path, key = _load_validated_trusted_key(
+        project=project,
+        state_directory=Path(arguments.state_directory),
+        key_file=Path(arguments.trust_key_file),
+        create=True)
     path = metadata_path(state, project_identifier(project), arguments.port)
     if listening_pids(arguments.port):
         raise ProcessSecurityError(f"port {arguments.port} is already occupied")

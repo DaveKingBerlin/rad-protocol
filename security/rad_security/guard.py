@@ -45,8 +45,10 @@ import ctypes
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import subprocess
+import tempfile
 from typing import Iterable, List, Optional, Tuple
 
 from .baseline import TrustedBaseline
@@ -231,7 +233,8 @@ def _icacls(*arguments) -> None:
         raise GuardError("icacls failed (%s)" % process.stdout.strip()[-200:])
 
 
-def _powershell_command(script: str) -> subprocess.CompletedProcess:
+def _powershell_command(script: str,
+                        stdin_text: Optional[str] = None) -> subprocess.CompletedProcess:
     """PH3-001: run a PowerShell command via absolute pinned executable.
 
     The script is passed through `-EncodedCommand` (Base64 of UTF-16LE) so no
@@ -241,6 +244,7 @@ def _powershell_command(script: str) -> subprocess.CompletedProcess:
     encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
     return subprocess.run(
         [tool, "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+        input=stdin_text,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -248,55 +252,160 @@ def _powershell_command(script: str) -> subprocess.CompletedProcess:
     )
 
 
+def _powershell_utf8_value(value: str) -> str:
+    """Return a PowerShell expression that reconstructs opaque UTF-8 data."""
+    encoded = base64.b64encode(value.encode("utf-8")).decode("ascii")
+    return ("[Text.Encoding]::UTF8.GetString("
+            "[Convert]::FromBase64String('%s'))" % encoded)
+
+
+def _powershell_error_marker(operation: str) -> str:
+    """Return a catch block that emits bounded, non-sensitive diagnostics."""
+    marker = "RAD_ACL_%s_ERROR" % operation.upper()
+    return (
+        "$category = if ($_.CategoryInfo) { [string]$_.CategoryInfo.Category } "
+        "else { 'NotSpecified' }; "
+        "$identifier = if ($_.FullyQualifiedErrorId) { "
+        "[string]$_.FullyQualifiedErrorId } else { "
+        "$_.Exception.GetType().FullName }; "
+        "$category = $category -replace '[^A-Za-z0-9_.-]', '_'; "
+        "$identifier = $identifier -replace '[^A-Za-z0-9_.,-]', '_'; "
+        "[Console]::Error.WriteLine('%s category={0} id={1}', "
+        "$category, $identifier)" % marker
+    )
+
+
+def _powershell_failure_detail(result: subprocess.CompletedProcess) -> str:
+    """Describe a helper failure without echoing paths, SDDL or other output."""
+    marker = re.search(
+        r"RAD_ACL_(?:CAPTURE|RESTORE)_ERROR "
+        r"category=[A-Za-z0-9_.-]+ id=[A-Za-z0-9_.,-]+",
+        result.stdout or "",
+    )
+    category = marker.group(0) if marker else "category=unreported"
+    return "exit=%s; %s" % (result.returncode, category)
+
+
+def _powershell_launch_failure_detail(error: OSError) -> str:
+    """Describe process creation failure without echoing command/path details."""
+    category = type(error).__name__
+    code = getattr(error, "winerror", None)
+    if code is None:
+        code = getattr(error, "errno", None)
+    return "launch-error=%s; code=%s" % (category, code)
+
+
+def _capture_acl_command(path: Path, output_path: Path) -> subprocess.CompletedProcess:
+    script = (
+        "$ErrorActionPreference = 'Stop'; "
+        "$p = %s; $f = %s; "
+        "try { "
+        "$sddl = (Get-Acl -LiteralPath $p -ErrorAction Stop).Sddl; "
+        "if ([String]::IsNullOrWhiteSpace($sddl)) { "
+        "throw [IO.InvalidDataException]::new('empty security descriptor') }; "
+        "[IO.File]::WriteAllText($f, $sddl, "
+        "(New-Object Text.UTF8Encoding($false))) "
+        "} catch { %s; exit 41 }"
+        % (_powershell_utf8_value(str(path)),
+           _powershell_utf8_value(str(output_path)),
+           _powershell_error_marker("capture"))
+    )
+    return _powershell_command(script)
+
+
 def _acl_sddl(path: Path) -> str:
     """PH3-009: capture the exact owner/group/DACL of a path as SDDL.
 
-    The SDDL is written to a private random-named temporary file by the pinned
-    PowerShell and read back by Python, avoiding PowerShell's redirected-stdout
-    CLIXML serialization entirely.
+    The SDDL is written to a pre-created file in a private temporary directory
+    by the pinned PowerShell and read back by Python, avoiding PowerShell's
+    redirected-stdout CLIXML serialization entirely.  PowerShell errors are
+    terminating and reduced to a category marker; SDDL is never logged.
     """
-    absolute = str(Path(path).resolve())
-    import tempfile as _tempfile
-    tmp = Path(_tempfile.gettempdir()) / ("rad-acl-%s.sddl" % os.urandom(8).hex())
-    try:
-        script = (
-            "& { param($p, $f) (Get-Acl -LiteralPath $p).Sddl | "
-            "Set-Content -LiteralPath $f -NoNewline } '%s' '%s'"
-            % (absolute.replace("'", "''"), str(tmp).replace("'", "''"))
-        )
-        result = _powershell_command(script)
-        if result.returncode != 0:
-            raise GuardError("cannot capture security descriptor for %s: %s"
-                             % (path, result.stdout.strip()[-200:]))
-        if not tmp.is_file():
-            raise GuardError("cannot capture security descriptor for %s: no output" % path)
-        info = tmp.lstat()
-        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or (
-                getattr(info, "st_file_attributes", 0) & _REPARSE_FLAG):
-            raise GuardError("unexpected security-descriptor output for %s" % path)
-        sddl = tmp.read_bytes().decode("utf-8", errors="strict").strip()
-    finally:
-        try:
-            tmp.unlink()
-        except OSError:
+    absolute = Path(path).resolve(strict=True)
+    with tempfile.TemporaryDirectory(prefix="rad-acl-") as directory:
+        tmp = Path(directory) / "descriptor.sddl"
+        # Prove the directory is writable before invoking PowerShell and avoid
+        # asking the child process to create a new name in a shared temp root.
+        with tmp.open("xb"):
             pass
+        original = tmp.lstat()
+        try:
+            result = _capture_acl_command(absolute, tmp)
+        except OSError as error:
+            raise GuardError(
+                "cannot capture security descriptor for %s: %s; output=untrusted"
+                % (path, _powershell_launch_failure_detail(error))) from error
+        if result.returncode != 0:
+            raise GuardError(
+                "cannot capture security descriptor for %s: %s; output=untrusted"
+                % (path, _powershell_failure_detail(result)))
+        if not tmp.exists():
+            raise GuardError(
+                "cannot capture security descriptor for %s: exit=0; output=missing"
+                % path)
+        info = tmp.lstat()
+        if not stat.S_ISREG(info.st_mode):
+            raise GuardError(
+                "cannot capture security descriptor for %s: exit=0; "
+                "output=not-regular" % path)
+        if info.st_nlink != 1:
+            raise GuardError(
+                "cannot capture security descriptor for %s: exit=0; "
+                "output=multiple-links" % path)
+        if getattr(info, "st_file_attributes", 0) & _REPARSE_FLAG:
+            raise GuardError(
+                "cannot capture security descriptor for %s: exit=0; "
+                "output=reparse" % path)
+        if (info.st_dev, info.st_ino) != (original.st_dev, original.st_ino):
+            raise GuardError(
+                "cannot capture security descriptor for %s: exit=0; "
+                "output=replaced" % path)
+        try:
+            payload = tmp.read_bytes()
+            sddl = payload.decode("utf-8-sig", errors="strict").strip()
+        except UnicodeDecodeError as error:
+            raise GuardError(
+                "cannot capture security descriptor for %s: exit=0; "
+                "output=invalid-encoding" % path) from error
+    if not payload:
+        raise GuardError(
+            "cannot capture security descriptor for %s: exit=0; output=empty"
+            % path)
     if not sddl or not sddl.startswith("O:"):
-        raise GuardError("invalid security descriptor for %s" % path)
+        raise GuardError(
+            "cannot capture security descriptor for %s: exit=0; "
+            "output=invalid-sddl" % path)
     return sddl
 
 
 def _set_acl_sddl(path: Path, sddl: str) -> None:
-    absolute = str(Path(path).resolve())
+    absolute = str(Path(path).resolve(strict=True))
+    # SDDL can be large.  Transport it through the anonymous stdin pipe rather
+    # than embedding it in the already Base64-encoded PowerShell command, which
+    # would hit Windows' 32,767-character process command-line limit.  The
+    # pipe payload is Base64 UTF-8 so Console input code pages cannot alter it.
+    stdin_payload = base64.b64encode(sddl.encode("utf-8")).decode("ascii")
     script = (
-        "& { param($p, $s) $fs = New-Object System.Security.AccessControl.FileSecurity; "
+        "$ErrorActionPreference = 'Stop'; $p = %s; try { "
+        "$encodedSddl = [Console]::In.ReadToEnd(); "
+        "$s = [Text.Encoding]::UTF8.GetString("
+        "[Convert]::FromBase64String($encodedSddl)); "
+        "if ([String]::IsNullOrWhiteSpace($s)) { "
+        "throw [IO.InvalidDataException]::new('empty security descriptor') }; "
+        "$fs = New-Object System.Security.AccessControl.FileSecurity; "
         "$fs.SetSecurityDescriptorSddlForm($s); "
-        "Set-Acl -LiteralPath $p -AclObject $fs } '%s' '%s'"
-        % (absolute.replace("'", "''"), sddl.replace("'", "''"))
+        "Set-Acl -LiteralPath $p -AclObject $fs -ErrorAction Stop "
+        "} catch { %s; exit 42 }"
+        % (_powershell_utf8_value(absolute), _powershell_error_marker("restore"))
     )
-    result = _powershell_command(script)
+    try:
+        result = _powershell_command(script, stdin_text=stdin_payload)
+    except OSError as error:
+        raise GuardError("cannot restore security descriptor for %s: %s"
+                         % (path, _powershell_launch_failure_detail(error))) from error
     if result.returncode != 0:
         raise GuardError("cannot restore security descriptor for %s: %s"
-                         % (path, result.stdout.strip()[-200:]))
+                         % (path, _powershell_failure_detail(result)))
 
 
 def _deny_for(entry: Path) -> str:

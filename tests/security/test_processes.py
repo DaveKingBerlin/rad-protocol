@@ -446,6 +446,225 @@ class ProcessTrustKeyAclTests(unittest.TestCase):
         processes.validate_trusted_state_paths(project, state, key)
         self.assertTrue(processes.state_directory_is_secure(state, key))
 
+    def test_state_and_key_accept_equivalent_windows_path_spelling(self):
+        project = self.base / "project"
+        project.mkdir()
+        state = self.base / "Mixed-Case-State"
+        state.mkdir()
+        key = state / "Trust.Key"
+        key.write_bytes(secrets.token_bytes(32))
+
+        # Windows path identity is case-insensitive. Forward slashes exercise
+        # a second harmless spelling difference without changing the object.
+        alternate_state = Path(str(state).swapcase().replace("\\", "/"))
+        alternate_key = Path(str(key).swapcase().replace("\\", "/"))
+        resolved_state, resolved_key = processes.validate_trusted_state_paths(
+            project, alternate_state, alternate_key)
+
+        self.assertTrue(os.path.samefile(state, resolved_state))
+        self.assertTrue(os.path.samefile(key, resolved_key))
+
+    def test_key_parent_accepts_equivalent_windows_short_name(self):
+        import ctypes
+
+        project = self.base / "project"
+        project.mkdir()
+        state = self.base / "state-directory-with-long-name"
+        state.mkdir()
+        key = state / "trust-key-with-long-name.key"
+        key.write_bytes(secrets.token_bytes(32))
+
+        buffer = ctypes.create_unicode_buffer(32768)
+        length = ctypes.windll.kernel32.GetShortPathNameW(
+            str(state), buffer, len(buffer))
+        self.assertGreater(length, 0, "Windows did not resolve state path identity")
+        short_state = Path(buffer.value)
+        short_key = short_state / key.name
+
+        resolved_state, resolved_key = processes.validate_trusted_state_paths(
+            project, state, short_key)
+
+        self.assertTrue(os.path.samefile(state, resolved_state))
+        self.assertTrue(os.path.samefile(key, resolved_key))
+        if os.path.normcase(str(state)) != os.path.normcase(str(short_state)):
+            self.assertIn("~", str(short_state))
+
+    def test_alias_identity_uses_filesystem_identity_not_path_spelling(self):
+        long_name = Path(r"C:\trusted-state-directory")
+        alias = Path(r"C:\TRUSTE~1")
+        self.assertNotEqual(os.path.normcase(str(long_name)),
+                            os.path.normcase(str(alias)))
+
+        with mock.patch("os.path.samefile", return_value=True) as samefile:
+            self.assertTrue(processes._same_existing_directory(
+                long_name, alias))
+        samefile.assert_called_once_with(long_name, alias)
+
+    def test_state_replacement_during_final_validation_fails_closed(self):
+        from contextlib import contextmanager
+
+        project = self.base / "project"
+        project.mkdir()
+        state = self.base / "state"
+        state.mkdir()
+        key = state / "trust.key"
+        key.write_bytes(secrets.token_bytes(32))
+        displaced = self.base / "displaced-state"
+        real_hold = processes._hold_path_identity
+        exchanged = False
+
+        @contextmanager
+        def exchange_before_open(path, *, directory, expected=None):
+            nonlocal exchanged
+            if directory and not exchanged:
+                exchanged = True
+                state.rename(displaced)
+                state.mkdir()
+            with real_hold(path, directory=directory, expected=expected):
+                yield
+
+        with mock.patch.object(processes, "_hold_path_identity",
+                               exchange_before_open), \
+                self.assertRaisesRegex(
+                    processes.ProcessSecurityError,
+                    "path changed during validation"):
+            processes.validate_trusted_state_paths(project, state, key)
+
+        self.assertTrue(exchanged)
+        self.assertTrue(displaced.is_dir())
+
+    def test_key_swap_between_create_and_final_binding_fails_closed(self):
+        project = self.base / "project"
+        project.mkdir()
+        state = self.base / "state"
+        state.mkdir()
+        key = state / "trust.key"
+        displaced = state / "displaced.key"
+        real_load_or_create = processes.load_or_create_key
+        attacker_key = b"A" * 32
+
+        def create_then_swap(path):
+            original = real_load_or_create(path)
+            path.rename(displaced)
+            path.write_bytes(attacker_key)
+            return original
+
+        with mock.patch.object(processes, "load_or_create_key",
+                               side_effect=create_then_swap), \
+                self.assertRaisesRegex(
+                    processes.ProcessSecurityError,
+                    "key changed during validation"):
+            processes._load_validated_trusted_key(
+                project=project, state_directory=state,
+                key_file=key, create=True)
+
+        self.assertEqual(attacker_key, key.read_bytes())
+        self.assertTrue(displaced.is_file())
+
+    def test_held_key_blocks_in_place_write_but_allows_security_checks(self):
+        state = self.base / "state"
+        state.mkdir()
+        key = state / "trust.key"
+        original = secrets.token_bytes(32)
+        key.write_bytes(original)
+
+        with processes._hold_path_identity(
+                key, directory=False, expected=key.stat()):
+            self.assertEqual(1, processes._nt_link_count(key))
+            self.assertEqual(original, key.read_bytes())
+            processes.harden_state_directory(state, key)
+            self.assertTrue(processes.state_directory_is_secure(state, key))
+            with self.assertRaises(PermissionError):
+                key.write_bytes(b"attacker replacement")
+
+        self.assertEqual(original, key.read_bytes())
+
+    def test_existing_key_writer_makes_identity_hold_fail_closed(self):
+        state = self.base / "state"
+        state.mkdir()
+        key = state / "trust.key"
+        key.write_bytes(secrets.token_bytes(32))
+
+        with key.open("r+b") as writer, self.assertRaisesRegex(
+                processes.ProcessSecurityError,
+                "cannot lock trusted process path identity"):
+            with processes._hold_path_identity(
+                    key, directory=False, expected=key.stat()):
+                self.fail("key identity hold unexpectedly admitted a writer")
+
+    def test_key_outside_state_is_rejected(self):
+        project = self.base / "project"
+        project.mkdir()
+        state = self.base / "state"
+        outside = self.base / "outside"
+        state.mkdir()
+        outside.mkdir()
+
+        with self.assertRaisesRegex(
+                processes.ProcessSecurityError, "directly inside"):
+            processes.validate_trusted_state_paths(
+                project, state, outside / "trust.key")
+
+    def test_relative_state_or_key_is_rejected(self):
+        project = self.base / "project"
+        project.mkdir()
+        state = self.base / "state"
+        state.mkdir()
+
+        for candidate_state, candidate_key in (
+                (Path("relative-state"), Path("relative-state/trust.key")),
+                (state, Path("relative-state/trust.key"))):
+            with self.subTest(state=candidate_state, key=candidate_key), \
+                    self.assertRaisesRegex(
+                        processes.ProcessSecurityError, "must be absolute"):
+                processes.validate_trusted_state_paths(
+                    project, candidate_state, candidate_key)
+
+    def test_missing_final_state_is_created_but_missing_parent_is_rejected(self):
+        project = self.base / "project"
+        project.mkdir()
+        state = self.base / "new-state"
+
+        resolved_state, resolved_key = processes.validate_trusted_state_paths(
+            project, state, state / "trust.key")
+        self.assertTrue(resolved_state.is_dir())
+        self.assertEqual(resolved_state / "trust.key", resolved_key)
+
+        missing_state = self.base / "missing-parent" / "state"
+        with self.assertRaises((FileNotFoundError,
+                                processes.ProcessSecurityError)):
+            processes.validate_trusted_state_paths(
+                project, missing_state, missing_state / "trust.key")
+
+    def test_key_below_nested_component_is_rejected(self):
+        project = self.base / "project"
+        project.mkdir()
+        state = self.base / "state"
+        nested = state / "nested"
+        nested.mkdir(parents=True)
+
+        with self.assertRaisesRegex(
+                processes.ProcessSecurityError, "directly inside"):
+            processes.validate_trusted_state_paths(
+                project, state, nested / "trust.key")
+
+    def test_state_junction_redirection_is_rejected(self):
+        project = self.base / "project"
+        project.mkdir()
+        actual_state = self.base / "actual-state"
+        actual_state.mkdir()
+        junction = self.base / "state-junction"
+        result = subprocess.run(
+            [processes._system32_tool("cmd.exe"), "/d", "/c", "mklink", "/J",
+             str(junction), str(actual_state)],
+            capture_output=True, text=True, errors="replace", check=False)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
+        with self.assertRaisesRegex(
+                processes.ProcessSecurityError, "linked/reparse"):
+            processes.validate_trusted_state_paths(
+                project, junction, junction / "trust.key")
+
     def test_broad_grant_fails_secure_check(self):
         state = self.base / "state"
         state.mkdir()

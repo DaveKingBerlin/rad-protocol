@@ -10,6 +10,7 @@ shadowing, and broker/HMAC secret discovery.  Every payload is sentinel-only
 and runs inside the test's isolated temporary directory.
 """
 
+import base64
 import hashlib
 import json
 import os
@@ -19,8 +20,10 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from security.install import install_release
+from security.rad_security import guard as guard_module
 from security.rad_security.baseline import calculate_release_digest
 from security.rad_security.guard import (
     ControlPlaneGuard,
@@ -490,6 +493,152 @@ class ControlPlaneGuardAdversarialTests(unittest.TestCase):
         self.assertIn("icacls.exe", icacls_tool.lower())
 
     # -- PH3-009: exact ACL restore --------------------------------------
+
+    def test_acl_sddl_capture_handles_unicode_and_shell_metacharacters(self):
+        target = self.base / "Prüfung ' & [acl]"
+        target.mkdir()
+        sddl = guard_module._acl_sddl(target)
+        self.assertTrue(sddl.startswith("O:"))
+
+    def test_acl_capture_powershell_failure_is_terminating_and_sanitized(self):
+        missing = self.base / "missing-secret-target"
+        output = self.base / "capture-output.sddl"
+        output.touch()
+        result = guard_module._capture_acl_command(missing, output)
+        self.assertEqual(41, result.returncode)
+        detail = guard_module._powershell_failure_detail(result)
+        self.assertIn("RAD_ACL_CAPTURE_ERROR", detail)
+        self.assertNotIn(str(missing), detail)
+        self.assertEqual(b"", output.read_bytes())
+
+    def test_acl_sddl_capture_reports_missing_output_fail_closed(self):
+        def no_output(_path, output):
+            output.unlink()
+            return subprocess.CompletedProcess([], 0, "", "")
+
+        with mock.patch.object(guard_module, "_capture_acl_command",
+                               side_effect=no_output):
+            with self.assertRaisesRegex(GuardError, r"exit=0; output=missing"):
+                guard_module._acl_sddl(self.project)
+
+    def test_acl_sddl_capture_reports_empty_output_fail_closed(self):
+        result = subprocess.CompletedProcess([], 0, "", "")
+        with mock.patch.object(guard_module, "_capture_acl_command",
+                               return_value=result):
+            with self.assertRaisesRegex(GuardError, r"exit=0; output=empty"):
+                guard_module._acl_sddl(self.project)
+
+    def test_acl_sddl_capture_reports_safe_powershell_error_category(self):
+        output = (
+            "RAD_ACL_CAPTURE_ERROR category=PermissionDenied "
+            "id=UnauthorizedAccessException\nSECRET-SDDL"
+        )
+        result = subprocess.CompletedProcess([], 41, output, "")
+        with mock.patch.object(guard_module, "_capture_acl_command",
+                               return_value=result):
+            with self.assertRaises(GuardError) as caught:
+                guard_module._acl_sddl(self.project)
+        detail = str(caught.exception)
+        self.assertIn("exit=41", detail)
+        self.assertIn("category=PermissionDenied", detail)
+        self.assertNotIn("SECRET-SDDL", detail)
+
+    def test_acl_sddl_capture_launch_failure_is_sanitized(self):
+        failure = OSError(5, "SECRET capture command and path")
+        with mock.patch.object(guard_module, "_capture_acl_command",
+                               side_effect=failure):
+            with self.assertRaises(GuardError) as caught:
+                guard_module._acl_sddl(self.project)
+        detail = str(caught.exception)
+        self.assertIn("launch-error=OSError", detail)
+        self.assertIn("code=5", detail)
+        self.assertNotIn("SECRET", detail)
+
+    def test_acl_sddl_capture_rejects_non_file_output(self):
+        def replace_with_directory(_path, output):
+            output.unlink()
+            output.mkdir()
+            return subprocess.CompletedProcess([], 0, "", "")
+
+        with mock.patch.object(guard_module, "_capture_acl_command",
+                               side_effect=replace_with_directory):
+            with self.assertRaisesRegex(GuardError, r"output=not-regular"):
+                guard_module._acl_sddl(self.project)
+
+    def test_acl_sddl_capture_rejects_invalid_encoding(self):
+        def invalid_encoding(_path, output):
+            output.write_bytes(b"\xff\xfe\xfa")
+            return subprocess.CompletedProcess([], 0, "", "")
+
+        with mock.patch.object(guard_module, "_capture_acl_command",
+                               side_effect=invalid_encoding):
+            with self.assertRaisesRegex(GuardError, r"output=invalid-encoding"):
+                guard_module._acl_sddl(self.project)
+
+    def test_acl_sddl_capture_rejects_invalid_descriptor(self):
+        def invalid_descriptor(_path, output):
+            output.write_text("not-an-sddl", encoding="utf-8")
+            return subprocess.CompletedProcess([], 0, "", "")
+
+        with mock.patch.object(guard_module, "_capture_acl_command",
+                               side_effect=invalid_descriptor):
+            with self.assertRaisesRegex(GuardError, r"output=invalid-sddl"):
+                guard_module._acl_sddl(self.project)
+
+    def test_acl_sddl_capture_accepts_utf8_bom(self):
+        def descriptor_with_bom(_path, output):
+            output.write_bytes(b"\xef\xbb\xbfO:G:D:(A;;FA;;;SY)")
+            return subprocess.CompletedProcess([], 0, "", "")
+
+        with mock.patch.object(guard_module, "_capture_acl_command",
+                               side_effect=descriptor_with_bom):
+            self.assertEqual("O:G:D:(A;;FA;;;SY)",
+                             guard_module._acl_sddl(self.project))
+
+    def test_acl_restore_reports_only_safe_powershell_diagnostics(self):
+        output = (
+            "RAD_ACL_RESTORE_ERROR category=InvalidOperation "
+            "id=SetAcl_InvalidOperation\nSECRET-SDDL"
+        )
+        result = subprocess.CompletedProcess([], 42, output, "")
+        with mock.patch.object(guard_module, "_powershell_command",
+                               return_value=result):
+            with self.assertRaises(GuardError) as caught:
+                guard_module._set_acl_sddl(self.project, "O:G:D:")
+        detail = str(caught.exception)
+        self.assertIn("exit=42", detail)
+        self.assertIn("category=InvalidOperation", detail)
+        self.assertNotIn("SECRET-SDDL", detail)
+
+    def test_acl_restore_large_sddl_uses_bounded_stdin_transport(self):
+        # This remains below the NT ACL size ceiling when materialized, while
+        # the former nested Base64 command transport exceeded 32,767 chars.
+        large_sddl = "O:SYG:SYD:" + "(A;;FR;;;SY)" * 2200
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        with mock.patch.object(guard_module, "_powershell_command",
+                               return_value=completed) as command:
+            guard_module._set_acl_sddl(self.project, large_sddl)
+
+        script = command.call_args.args[0]
+        stdin_payload = command.call_args.kwargs["stdin_text"]
+        encoded_command = base64.b64encode(
+            script.encode("utf-16-le")).decode("ascii")
+        self.assertGreater(len(stdin_payload), 32767)
+        self.assertLess(len(encoded_command), 32767)
+        self.assertNotIn(large_sddl, script)
+        self.assertEqual(large_sddl, base64.b64decode(
+            stdin_payload).decode("utf-8"))
+
+    def test_acl_restore_launch_failure_is_sanitized(self):
+        failure = OSError(206, "SECRET oversized command and path")
+        with mock.patch.object(guard_module, "_powershell_command",
+                               side_effect=failure):
+            with self.assertRaises(GuardError) as caught:
+                guard_module._set_acl_sddl(self.project, "O:SYG:SYD:")
+        detail = str(caught.exception)
+        self.assertIn("launch-error=OSError", detail)
+        self.assertIn("code=206", detail)
+        self.assertNotIn("SECRET", detail)
 
     def test_restore_is_exact_with_preexisting_deny(self):
         build_project(self.project)
