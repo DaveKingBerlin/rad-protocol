@@ -53,3 +53,6 @@ __pycache__/
 
 #Sanity script
 publish-sanitized-history.ps1
+
+#Instruction for Phases
+Phase*.md
