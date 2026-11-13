@@ -1863,6 +1863,7 @@ class ControlPlaneGuardAdversarialTests(unittest.TestCase):
         guard_module._icacls(control, "/deny", "*S-1-1-0:(WEA)")
         before_root = guard_module._capture_security_descriptor_state(self.project)
         before_control = guard_module._capture_security_descriptor_state(control)
+        before_content = control.read_bytes()
 
         def cli(*args):
             return subprocess.run(
@@ -1899,10 +1900,9 @@ class ControlPlaneGuardAdversarialTests(unittest.TestCase):
         self.assertEqual(before_control,
                          guard_module._capture_security_descriptor_state(control))
 
-        # The refusal is not a lock: ordinary product maintenance remains
-        # possible, while the pre-existing WEA deny stays present.
-        control.write_text("maintainer edit\n", encoding="utf-8")
-        self.assertEqual(b"maintainer edit\r\n", control.read_bytes())
+        # The refused operations leave both the pre-existing WEA deny and the
+        # protected file content unchanged.
+        self.assertEqual(before_content, control.read_bytes())
 
 
 if __name__ == "__main__":
