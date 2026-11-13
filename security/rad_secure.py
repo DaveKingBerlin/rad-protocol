@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from rad_security.launcher import (NetworkPolicy, launch_trusted_project,
                                    matrix_as_dicts, prepare_secure_launch,
                                    verify_project)
-from rad_security.guard import GuardError, lock_control_plane, protected_paths_from_baseline
+from rad_security.guard import GuardError, protected_paths_from_baseline
 from rad_security.baseline import load_verified_installation
 from rad_security.policy import Role
 from rad_security.workspace import ProductWorkspace, MAX_DATA_BYTES
@@ -34,7 +34,10 @@ def main(argv=None):
     sub.add_parser("capabilities", help="Report release-owned capability status; does not launch")
     verify = sub.add_parser("verify", help="Check target against installed independent baseline")
     launch = sub.add_parser("launch", help="Secure by default; no implicit trusted-mode fallback")
-    guard = sub.add_parser("guard", help="Lock/verify/unlock the repository control plane at the OS boundary")
+    guard = sub.add_parser(
+        "guard",
+        help=("Observe the repository control-plane boundary; standalone "
+              "lock/unlock are refused without durable recovery state"))
     read = sub.add_parser("read", help="Structured bounded product data read (no subprocess)")
     write = sub.add_parser("write", help="Structured product edit; bounded bytes from stdin, no control edits")
     for command in (verify, launch, guard, read, write):
@@ -74,13 +77,10 @@ def main(argv=None):
             verify_project(installation, args.project, args.release_sha256)
             protected = _protected_paths(installation, args.release_sha256)
             if args.action == "lock":
-                guarded = lock_control_plane(args.project, protected)
-                guarded.verify()
-                print(json.dumps({
-                    "control_plane": "locked",
-                    "locker_pid": __import__("os").getpid(),
-                }, indent=2))
-                return 0
+                raise GuardError(
+                    "standalone lock refused: no durable recovery snapshot is "
+                    "available; use trusted-project launch for an in-process "
+                    "lock and verified restore")
             if args.action == "verify":
                 # Purely observational; never changes ACL state.
                 from rad_security.guard import check_control_plane_locked
@@ -91,9 +91,8 @@ def main(argv=None):
                 return 2
             if args.action == "unlock":
                 from rad_security.guard import unlock_control_plane
-                count = unlock_control_plane(args.project, protected)
-                print(json.dumps({"control_plane": "unlocked", "entries": count}, indent=2))
-                return 0
+                unlock_control_plane(args.project, protected)
+                raise AssertionError("standalone unlock unexpectedly returned")
         if args.operation in ("read", "write"):
             verify_project(installation, args.project, args.release_sha256)
             workspace = ProductWorkspace(args.project, args.role)

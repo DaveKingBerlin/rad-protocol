@@ -54,14 +54,37 @@ remain for trusted projects only.
 ## Control-plane guard (Phase 2C)
 
 For all runtimes, a trusted-project session now requires
-`--guard-control-plane`: the repository control plane is locked with reversible
-Windows deny ACLs (write/truncate/delete/rename-over/create denied at the OS
-boundary for every process and descendant) and shown to be locked before the
-runtime executable starts, then restored exactly when the session ends. Direct
-agent file tools and every child/grandchild of the runtime therefore inherit the
-same OS boundary. This binds tools, shell commands, test frameworks, plugins,
-formatters, MCP servers and arbitrary descendants to the control-plane boundary
-independent of model cooperation or prompt instructions.
+`--guard-control-plane`: the repository control plane receives temporary
+Windows deny ACLs and is shown to reject post-lock opens for
+write/truncate/delete/rename-over/create before the runtime executable starts.
+Windows does not revoke access already granted to an existing handle when a
+DACL changes, and file share flags do not independently govern
+`FILE_WRITE_ATTRIBUTES`; a pre-existing handle can therefore retain previously
+granted data or metadata rights. When normal in-process session cleanup runs,
+the captured Owner/Group/DACL SDDL and the full 16-bit control word returned
+with that requested descriptor are restored and verified. SACL ACEs and the
+resource-manager control byte are outside this snapshot; binary descriptor byte
+identity is not claimed. Missing, NULL and currently unsupported empty DACLs
+cause the lock to fail before any ACL mutation. Snapshots are not persisted, so
+an abrupt launcher termination has no exact crash-recovery path. Public
+standalone `guard --action lock` and `guard --action unlock` refuse before
+guard target enumeration or ACL mutation, after baseline admission.
+`guard --action verify` is read-only and does not report that recovery state
+exists. Older locked projects without a trusted snapshot require an
+independently trusted backup or manual review.
+
+All target handles are acquired before mutation. The identity-bound target
+handle used while capturing each trusted snapshot stays open through the deny
+write and verified restore, removing the former post-mutation close/reopen gap.
+This guard is a Trusted Project defense-in-depth control under the project
+owner's Windows identity; it is not Hostile Project isolation. The certified
+WSL2 guarantees in the matrix apply only to that WSL2 backend.
+
+The runtime starts only after lock verification, so its tools, shell commands,
+test frameworks, plugins, formatters, MCP servers and descendants encounter the
+post-lock access checks when opening protected objects. This does not constrain
+rights held by handles opened before the guard and is one reason the Windows
+guard remains a Trusted Project control rather than hostile-agent isolation.
 
 ## Direct OpenCode adapter permissions
 

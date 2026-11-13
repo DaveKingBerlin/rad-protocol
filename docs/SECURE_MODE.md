@@ -94,30 +94,70 @@ Product writes are not transactional: interruption may leave a partial write.
 
 ## Control-plane guard (`guard`)
 
-`rad_secure.py guard --action lock|verify|unlock` applies a reversible
-Windows ACL boundary over the repository control plane (`.rad/**`, adapters,
+The public `rad_secure.py guard --action verify` command observes the Windows
+ACL boundary over the repository control plane (`.rad/**`, adapters,
 `AGENTS.md`, generator, governance/decision records and every other classified
-control or generated-output path). While locked, **any** process — shell, test
-framework, Python/Node/PowerShell, plugin, formatter, MCP server, direct
-filesystem API, child, grandchild — receives `PermissionError` from the OS for
-write, truncate, delete, rename-over and create-in-control operations,
-independent of model instructions or tool permissions. The repository root gets
-a name-entry deny so root-level control files cannot be deleted or renamed over;
-collateral is that top-level create/rename/delete is also denied during a
-guarded session (content edits inside product subdirectories stay writable).
-`verify` only observes the effective boundary; `unlock` restores the prior ACLs.
+control or generated-output path). It never changes ACLs and does not establish
+that a trusted recovery snapshot exists. Public standalone `lock` and `unlock`
+are retained as recognized actions but, after baseline admission, refuse before
+guard target enumeration or ACL mutation because there is no durable recovery
+journal. Only the trusted-project launcher uses the internal in-process
+lock/verify/restore lifecycle.
+
+While that internal guard is active, opens made after the lock for write,
+truncate, delete, rename-over and create-in-control are denied at the OS ACL
+boundary. The runtime starts only after this boundary is verified, so its shell,
+test framework, Python/Node/PowerShell, plugins, formatters, MCP servers, direct
+filesystem APIs and descendants encounter those post-lock checks. Windows does
+not revoke access already granted to an existing handle when a DACL changes,
+and file share flags do not independently govern `FILE_WRITE_ATTRIBUTES`;
+pre-existing handles can retain previously granted content or metadata rights.
+The repository root gets a name-entry deny so root-level control files cannot be
+deleted or renamed over; collateral is that top-level create/rename/delete is
+also denied during a guarded session (content edits inside product
+subdirectories stay writable).
+
+On Windows, PH3-009's exact restore scope is the captured Owner, Group and DACL
+SDDL (including ACE order and inheritance flags) plus the full 16-bit
+`SECURITY_DESCRIPTOR_CONTROL` word returned with that requested descriptor.
+The guard does not write SACL components and does not promise a byte-for-byte
+identical binary descriptor. For
+`SE_DACL_AUTO_INHERITED` snapshots it restores through a pinned file handle;
+when that bit was clear it uses `SetFileSecurityW` while the same object and its
+relevant path ancestors remain pinned, then verifies the saved SDDL and control
+word. This older API is retained because the supported handle setter changes
+the AI-clear inheritance state on the tested NTFS provider.
+
+Before the first mutation, the guard validates every captured snapshot and
+refuses descriptors whose DACL is missing or NULL. A structurally valid empty
+DACL is also refused before mutation because exact safe recovery for that state
+has not been demonstrated on both restore paths; the guard never invents a
+replacement DACL.
+
+All target handles are acquired before the first mutation. Each
+identity-checked `MAXIMUM_ALLOWED` target handle remains open from snapshot
+capture through deny mutation, rollback or verified restore. This removes the
+former close/reopen handoff after the target ACL was changed. If the launcher
+terminates before its in-process cleanup, ACL mutations can remain; exact crash
+recovery is unsupported. An older project left locked without trusted recovery
+data requires an independently trusted backup or manual security review. RAD
+does not remove matching deny ACEs as a guess at the original ACL.
 
 Trusted-project launch (`launch --mode trusted-project`) now **requires**
 `--guard-control-plane`; a runtime process starts only after the control plane
-is OS-locked and shown to be locked. This binds every descendant of the runtime
-to the control-plane boundary at the OS layer.
+is OS-locked and shown to be locked. The runtime and its descendants therefore
+encounter the OS control-plane boundary on protected-object opens made after
+lock verification, subject to the pre-existing-handle limitation above.
 
 `install.py --harden` additionally makes an installed authority tree (launcher,
 policy, baseline, verifier, process state) mutation-denied for every principal,
 including the owning account, so the target repository cannot modify the trusted
-installation even under the same OS user; maintenance deliberately unhardens
-before placing a new release. In deployment the installed tree remains protected
-outside the untrusted workspace and by OS policy for the operator principal.
+installation even under the same OS user. The production CLI exposes no
+supported unhardening workflow: the hardened state remains active, and replacing
+that installation requires a separately reviewed trusted installation procedure.
+RAD must fail closed rather than alter that protection without trusted recovery
+state. In deployment the installed tree remains outside the untrusted workspace
+and protected by OS policy for the operator principal.
 
 The guard is defense-in-depth. A same-account process that owns the files
 retains the OS owner's right to rewrite the DACL; closing that residual requires
@@ -197,17 +237,18 @@ or signing infrastructure was created by this remediation.
 ## Enforcement accounting
 
 - RAD enforced: external digest, strict manifest/path/role checks, unsupported
-  runtime refusal, explicit compatibility-mode selection, reversible
-  control-plane guard, hardened installation, guard-bound trusted launch,
+  runtime refusal, explicit compatibility-mode selection, in-process verified
+  control-plane restore, hardened installation, guard-bound trusted launch,
   WSL-backend verification and admission.
 - OS enforced and tested: Windows Job ownership, suspended assignment,
-  kill-on-close, structured handle/link/directory-sharing protections, ACL
-  control-plane denial for every descendant process; WSL: private netns +
-  `socket()` denial, immutable root-owned control plane, non-root host-less
-  isolation.
+  kill-on-close, structured handle/link/directory-sharing protections, and ACL
+  control-plane denial for protected-object opens made after lock verification
+  by the launched runtime and descendants; WSL: private netns + `socket()`
+  denial, immutable root-owned control plane, non-root host-less isolation.
 - User dependent: trusted release/pin acquisition, protected installation,
-  explicit maintenance and trusted-project execution, out-of-band authenticated
-  unlock for a stale guard, provisioning of the clean dedicated WSL distro.
+  explicit maintenance and trusted-project execution, trusted backup/manual
+  review for legacy stale Windows guards, provisioning of the clean dedicated
+  WSL distro.
 - Unverified: full runtime extension suppression for non-WSL backends, all
   runtime edit tools for non-certified backends, destination-approval modes,
   LOOPBACK-ONLY/EXPLICITLY-APPROVED network policies, live model-session

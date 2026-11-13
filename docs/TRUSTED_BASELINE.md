@@ -47,20 +47,31 @@ the decision for tool calls and every subprocess descendant.
 
 Phase 2C adds the OS boundary:
 
-- `rad_secure.py guard --action lock` applies reversible deny ACLs
-  (`*S-1-1-0` numeric Everyone) to every control/generated-control file and
-  directory in the target repository and to the repository root name-entry set,
-  so any process or descendant fails at the OS layer with `PermissionError` for
-  write, truncate, delete, rename-over and create-in-control. `verify` observes
-  the boundary without changing it; `unlock` removes the deny ACEs.
-- Trusted-project launch requires `--guard-control-plane` and verifies the lock
-  before starting the runtime executable, then restores the ACLs on exit.
+- After baseline admission, public `rad_secure.py guard --action lock` and
+  `--action unlock` refuse before guard target enumeration or ACL mutation
+  because no durable recovery snapshot is available. `--action verify` observes
+  the effective boundary without changing it and does not claim that recovery
+  data exists.
+- Trusted-project launch requires `--guard-control-plane` and uses an internal
+  in-process lifecycle: capture and validate every snapshot, acquire every
+  target handle, apply deny ACLs, verify the boundary, run the trusted-project
+  executable, then restore and verify the captured ACLs during normal cleanup.
+  The same identity-bound target handle remains open from capture through
+  mutation and restoration; there is no post-mutation close/reopen handoff.
+  Missing, NULL and currently unsupported empty DACLs fail before mutation.
+- Snapshots are process-local. Abrupt launcher termination has no exact automatic
+  recovery path. A project left locked by an older RAD version without trusted
+  recovery data requires an independently trusted backup or manual security
+  review; RAD does not infer the original ACL by deleting matching deny ACEs.
 - `install.py --harden` makes the installed authority tree mutation-denied for
   every principal (including the owning account). The target repository cannot
   modify the trusted installation, launcher, policy, verifier or baseline even
-  under the same OS user; maintenance unhardens deliberately before placing a
-  reviewed new release. Deployment keeps the installation outside the untrusted
-  workspace and provisioned with operator OS policy.
+  under the same OS user. The production CLI exposes no supported unhardening
+  workflow: hardening remains active, and replacement requires a separately
+  reviewed trusted installation procedure. RAD must fail closed rather than
+  alter that protection without trusted recovery state. Deployment keeps the
+  installation outside the untrusted workspace and provisioned with operator OS
+  policy.
 
 ## WSL2 secure backend (Phase 2D)
 
