@@ -250,9 +250,9 @@ class WslSecureBackendTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="rad-shadow-") as shadow:
             (Path(shadow) / "icacls.exe").write_bytes(b"MZ-not-really")
             (Path(shadow) / "wsl.exe").write_bytes(b"MZ-not-really")
-            icacls, ps = _resolve_tools()
+            icacls = _resolve_tools()
             self.assertIn("System32", icacls)
-            self.assertIn("System32", ps)
+            self.assertIn("icacls.exe", icacls.lower())
         # A harmless call still works with the absolute tool.
         result = self.sandbox("echo SHADOW-RESOLVE-OK")
         self.assertIn("SHADOW-RESOLVE-OK", result.stdout)
