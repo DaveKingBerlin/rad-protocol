@@ -736,6 +736,30 @@ def process_creation_identity(pid: int) -> int | None:
         kernel32.CloseHandle(handle)
 
 
+def _running_popen_creation_identity(process: subprocess.Popen[bytes]) -> int | None:
+    """Return the identity of the exact process object retained by Popen."""
+    if os.name != "nt":
+        raise ProcessSecurityError("Windows process identity is unavailable on this platform")
+    handle = getattr(process, "_handle", None)
+    if not handle:
+        return None
+    creation = wintypes.FILETIME()
+    exit_time = wintypes.FILETIME()
+    kernel_time = wintypes.FILETIME()
+    user_time = wintypes.FILETIME()
+    if not kernel32.GetProcessTimes(
+        handle,
+        ctypes.byref(creation),
+        ctypes.byref(exit_time),
+        ctypes.byref(kernel_time),
+        ctypes.byref(user_time),
+    ):
+        return None
+    if exit_time.dwHighDateTime or exit_time.dwLowDateTime:
+        return None
+    return (creation.dwHighDateTime << 32) | creation.dwLowDateTime
+
+
 def process_identity_matches(pid: int, expected_creation_time: int) -> bool:
     actual = process_creation_identity(pid)
     return actual is not None and hmac.compare_digest(str(actual), str(expected_creation_time))
@@ -1231,6 +1255,36 @@ def _spawn_guardian(arguments: argparse.Namespace) -> subprocess.Popen[bytes]:
     )
 
 
+def _validate_startup_metadata_owner(
+    payload: Mapping[str, Any], *, guardian_pid: int, guardian_creation: int
+) -> None:
+    if payload["guardian_pid"] != guardian_pid or not hmac.compare_digest(
+        str(payload["guardian_creation_time"]), str(guardian_creation)
+    ):
+        raise ProcessSecurityError("startup metadata belongs to a different guardian")
+
+
+def _terminate_failed_start_guardian(guardian: subprocess.Popen[bytes]) -> bool:
+    """Terminate only the exact spawned Guardian and confirm it has exited."""
+    try:
+        if guardian.poll() is None:
+            try:
+                guardian.terminate()
+            except OSError:
+                # The exact held process may have exited between poll() and
+                # TerminateProcess. Re-query that same handle before deciding
+                # whether cleanup failed; never fall back to its PID.
+                if guardian.poll() is None:
+                    return False
+        guardian.wait(timeout=5)
+        return True
+    except (OSError, subprocess.TimeoutExpired):
+        try:
+            return guardian.poll() is not None
+        except OSError:
+            return False
+
+
 def start_run(arguments: argparse.Namespace) -> dict[str, Any]:
     if os.name != "nt":
         raise ProcessSecurityError("secure test-process ownership currently requires Windows")
@@ -1260,26 +1314,60 @@ def start_run(arguments: argparse.Namespace) -> dict[str, Any]:
     arguments.state_directory = state
     arguments.trust_key_file = key_path
     guardian = _spawn_guardian(arguments)
+    guardian_creation = _running_popen_creation_identity(guardian)
     deadline = time.monotonic() + arguments.startup_timeout + 5
-    while time.monotonic() < deadline:
-        if path.exists():
-            try:
-                payload = read_metadata(path, key, expected_project=project, expected_port=arguments.port)
-            except ProcessSecurityError:
-                time.sleep(0.05)
-                continue
-            if payload["state"] == "ready":
-                if payload["guardian_pid"] != guardian.pid:
-                    raise ProcessSecurityError("startup metadata belongs to a different guardian")
-                if not process_identity_matches(payload["guardian_pid"], payload["guardian_creation_time"]):
-                    raise ProcessSecurityError("guardian identity changed during startup")
-                return payload
-            if payload["state"] == "failed":
-                raise ProcessSecurityError(f"test application startup failed: {payload['failure_code']}")
-        if guardian.poll() is not None:
-            raise ProcessSecurityError("guardian exited before establishing owned readiness")
-        time.sleep(0.05)
-    raise ProcessSecurityError("timed out waiting for the process guardian")
+    try:
+        while time.monotonic() < deadline:
+            if guardian_creation is None:
+                guardian_creation = _running_popen_creation_identity(guardian)
+            if path.exists():
+                try:
+                    payload = read_metadata(path, key, expected_project=project, expected_port=arguments.port)
+                except ProcessSecurityError:
+                    time.sleep(0.05)
+                    continue
+                if payload["state"] == "ready":
+                    if guardian_creation is not None:
+                        _validate_startup_metadata_owner(
+                            payload, guardian_pid=guardian.pid, guardian_creation=guardian_creation
+                        )
+                        if not hmac.compare_digest(
+                            str(_running_popen_creation_identity(guardian)), str(guardian_creation)
+                        ):
+                            raise ProcessSecurityError("guardian identity changed during startup")
+                        if not process_identity_matches(payload["guardian_pid"], payload["guardian_creation_time"]):
+                            raise ProcessSecurityError("guardian identity changed during startup")
+                        return payload
+                if payload["state"] == "failed":
+                    if guardian_creation is not None:
+                        _validate_startup_metadata_owner(
+                            payload, guardian_pid=guardian.pid, guardian_creation=guardian_creation
+                        )
+                        raise ProcessSecurityError(f"test application startup failed: {payload['failure_code']}")
+            if guardian.poll() is not None:
+                # The guardian publishes terminal state atomically. It can replace
+                # the starting record and exit between the read above and poll().
+                # Re-read once, accepting a failure only from this exact process
+                # instance; PID equality alone is not process authority.
+                try:
+                    payload = read_metadata(path, key, expected_project=project, expected_port=arguments.port)
+                except ProcessSecurityError:
+                    pass
+                else:
+                    if payload["state"] == "failed" and guardian_creation is not None:
+                        _validate_startup_metadata_owner(
+                            payload, guardian_pid=guardian.pid, guardian_creation=guardian_creation
+                        )
+                        raise ProcessSecurityError(
+                            f"test application startup failed: {payload['failure_code']}"
+                        )
+                raise ProcessSecurityError("guardian exited before establishing owned readiness")
+            time.sleep(0.05)
+        raise ProcessSecurityError("timed out waiting for the process guardian")
+    except (ProcessSecurityError, OSError) as exc:
+        if not _terminate_failed_start_guardian(guardian):
+            raise ProcessSecurityError("guardian startup failed; cleanup was not confirmed") from exc
+        raise
 
 
 def _common_paths(parser: argparse.ArgumentParser) -> None:

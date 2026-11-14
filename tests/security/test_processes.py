@@ -305,6 +305,317 @@ class WindowsProcessOwnershipTests(unittest.TestCase):
         self.active_ports.discard(port)
         self.assertTrue(response["terminated_job"])
 
+    def test_start_reports_authenticated_failure_published_during_exit_observation(self) -> None:
+        port = self.free_port()
+        guardian_process = self.controlled_sleeper()
+        guardian_creation = processes.process_creation_identity(guardian_process.pid)
+        self.assertIsNotNone(guardian_creation)
+        state_path = self.state_path(port)
+        starting = self.signed_payload(port, guardian_process.pid, int(guardian_creation))
+        starting["state"] = "starting"
+        failed = dict(starting, state="failed", failure_code="DETERMINISTIC_START_FAILURE")
+
+        class ExitedGuardian:
+            pid = guardian_process.pid
+
+            def poll(self) -> int:
+                processes.write_metadata(state_path, failed, self_key)
+                return 2
+
+            def wait(self, timeout: float) -> int:
+                return 2
+
+        self_key = self.key
+        arguments = argparse.Namespace(
+            command=self.sleeper_command(), port=port,
+            project=self.project.resolve(), working_directory=self.project.resolve(),
+            state_directory=self.state, trust_key_file=self.key_file,
+            startup_timeout=1, ready_url="", environment=[],
+        )
+
+        def spawn_with_starting_metadata(_arguments: argparse.Namespace) -> ExitedGuardian:
+            processes.write_metadata(state_path, starting, self.key)
+            return ExitedGuardian()
+
+        with mock.patch.object(processes, "listening_pids", return_value=[]), \
+             mock.patch.object(processes, "_spawn_guardian", side_effect=spawn_with_starting_metadata), \
+             mock.patch.object(processes, "_running_popen_creation_identity", return_value=int(guardian_creation)), \
+             self.assertRaisesRegex(
+                 processes.ProcessSecurityError,
+                 "test application startup failed: DETERMINISTIC_START_FAILURE",
+             ):
+            processes.start_run(arguments)
+
+    def test_start_rejects_foreign_failure_published_during_exit_observation(self) -> None:
+        port = self.free_port()
+        guardian_process = self.controlled_sleeper()
+        foreign_process = self.controlled_sleeper()
+        guardian_creation = processes.process_creation_identity(guardian_process.pid)
+        foreign_creation = processes.process_creation_identity(foreign_process.pid)
+        self.assertIsNotNone(guardian_creation)
+        self.assertIsNotNone(foreign_creation)
+        state_path = self.state_path(port)
+        starting = self.signed_payload(port, guardian_process.pid, int(guardian_creation))
+        starting["state"] = "starting"
+        foreign_failed = self.signed_payload(port, foreign_process.pid, int(foreign_creation))
+        foreign_failed.update(state="failed", failure_code="FOREIGN_FAILURE")
+
+        class ExitedGuardian:
+            pid = guardian_process.pid
+
+            def poll(self) -> int:
+                processes.write_metadata(state_path, foreign_failed, self_key)
+                return 2
+
+            def wait(self, timeout: float) -> int:
+                return 2
+
+        self_key = self.key
+        arguments = argparse.Namespace(
+            command=self.sleeper_command(), port=port,
+            project=self.project.resolve(), working_directory=self.project.resolve(),
+            state_directory=self.state, trust_key_file=self.key_file,
+            startup_timeout=1, ready_url="", environment=[],
+        )
+
+        def spawn_with_starting_metadata(_arguments: argparse.Namespace) -> ExitedGuardian:
+            processes.write_metadata(state_path, starting, self.key)
+            return ExitedGuardian()
+
+        with mock.patch.object(processes, "listening_pids", return_value=[]), \
+             mock.patch.object(processes, "_spawn_guardian", side_effect=spawn_with_starting_metadata), \
+             mock.patch.object(processes, "_running_popen_creation_identity", return_value=int(guardian_creation)), \
+             self.assertRaisesRegex(
+                 processes.ProcessSecurityError,
+                 "startup metadata belongs to a different guardian",
+             ) as caught:
+            processes.start_run(arguments)
+        self.assertNotIn("FOREIGN_FAILURE", str(caught.exception))
+
+    def test_start_never_accepts_ready_when_popen_identity_is_unavailable(self) -> None:
+        port = self.free_port()
+        guardian_process = self.controlled_sleeper()
+        guardian_creation = processes.process_creation_identity(guardian_process.pid)
+        self.assertIsNotNone(guardian_creation)
+        state_path = self.state_path(port)
+        starting = self.signed_payload(port, guardian_process.pid, int(guardian_creation))
+        starting["state"] = "starting"
+        unbound_ready = dict(
+            starting,
+            state="ready",
+            guardian_creation_time=int(guardian_creation) + 1,
+            listener_pid=guardian_process.pid,
+        )
+
+        class ExitedGuardian:
+            pid = guardian_process.pid
+
+            def __init__(self) -> None:
+                self.poll_count = 0
+
+            def poll(self) -> int | None:
+                self.poll_count += 1
+                if self.poll_count == 1:
+                    return None
+                return 2
+
+            def wait(self, timeout: float) -> int:
+                return 2
+
+        self_key = self.key
+        fake_guardian = ExitedGuardian()
+        arguments = argparse.Namespace(
+            command=self.sleeper_command(), port=port,
+            project=self.project.resolve(), working_directory=self.project.resolve(),
+            state_directory=self.state, trust_key_file=self.key_file,
+            startup_timeout=1, ready_url="", environment=[],
+        )
+
+        def spawn_with_starting_metadata(_arguments: argparse.Namespace) -> ExitedGuardian:
+            processes.write_metadata(state_path, unbound_ready, self.key)
+            return fake_guardian
+
+        with mock.patch.object(processes, "listening_pids", return_value=[]), \
+             mock.patch.object(processes, "_spawn_guardian", side_effect=spawn_with_starting_metadata), \
+             mock.patch.object(processes, "_running_popen_creation_identity", return_value=None), \
+             mock.patch.object(processes, "process_identity_matches", return_value=True), \
+             self.assertRaisesRegex(
+                 processes.ProcessSecurityError,
+                 "guardian exited before establishing owned readiness",
+             ) as caught:
+            processes.start_run(arguments)
+        self.assertGreaterEqual(fake_guardian.poll_count, 2)
+        self.assertIn("owned readiness", str(caught.exception))
+
+    def test_start_timeout_terminates_only_the_spawned_guardian_handle(self) -> None:
+        port = self.free_port()
+
+        class StalledGuardian:
+            pid = 4242
+
+            def __init__(self) -> None:
+                self.terminated = False
+                self.wait_timeout: float | None = None
+
+            def poll(self) -> None:
+                return None
+
+            def terminate(self) -> None:
+                self.terminated = True
+
+            def wait(self, timeout: float) -> int:
+                self.wait_timeout = timeout
+                return 1
+
+        fake_guardian = StalledGuardian()
+        arguments = argparse.Namespace(
+            command=self.sleeper_command(), port=port,
+            project=self.project.resolve(), working_directory=self.project.resolve(),
+            state_directory=self.state, trust_key_file=self.key_file,
+            startup_timeout=1, ready_url="", environment=[],
+        )
+
+        with mock.patch.object(processes, "listening_pids", return_value=[]), \
+             mock.patch.object(processes, "_spawn_guardian", return_value=fake_guardian), \
+             mock.patch.object(processes, "_running_popen_creation_identity", return_value=None), \
+             mock.patch.object(processes.time, "monotonic", side_effect=(0.0, 7.0)), \
+             self.assertRaisesRegex(
+                 processes.ProcessSecurityError,
+                 "timed out waiting for the process guardian",
+             ):
+            processes.start_run(arguments)
+        self.assertTrue(fake_guardian.terminated)
+        self.assertEqual(5, fake_guardian.wait_timeout)
+
+    def test_terminate_race_preserves_original_error_when_handle_confirms_exit(self) -> None:
+        port = self.free_port()
+
+        class ExitedDuringTerminate:
+            pid = 4242
+
+            def __init__(self) -> None:
+                self.exited = False
+                self.wait_timeout: float | None = None
+
+            def poll(self) -> int | None:
+                return 1 if self.exited else None
+
+            def terminate(self) -> None:
+                self.exited = True
+                raise OSError("simulated terminate/exit race")
+
+            def wait(self, timeout: float) -> int:
+                self.wait_timeout = timeout
+                return 1
+
+        fake_guardian = ExitedDuringTerminate()
+        arguments = argparse.Namespace(
+            command=self.sleeper_command(), port=port,
+            project=self.project.resolve(), working_directory=self.project.resolve(),
+            state_directory=self.state, trust_key_file=self.key_file,
+            startup_timeout=1, ready_url="", environment=[],
+        )
+
+        with mock.patch.object(processes, "listening_pids", return_value=[]), \
+             mock.patch.object(processes, "_spawn_guardian", return_value=fake_guardian), \
+             mock.patch.object(processes, "_running_popen_creation_identity", return_value=None), \
+             mock.patch.object(processes.time, "monotonic", side_effect=(0.0, 7.0)), \
+             self.assertRaisesRegex(
+                 processes.ProcessSecurityError,
+                 "^timed out waiting for the process guardian$",
+             ):
+            processes.start_run(arguments)
+        self.assertTrue(fake_guardian.exited)
+        self.assertEqual(5, fake_guardian.wait_timeout)
+
+    def test_terminate_error_reports_unconfirmed_cleanup_while_handle_is_live(self) -> None:
+        port = self.free_port()
+
+        class LiveGuardian:
+            pid = 4242
+
+            def __init__(self) -> None:
+                self.terminate_calls = 0
+
+            def poll(self) -> None:
+                return None
+
+            def terminate(self) -> None:
+                self.terminate_calls += 1
+                raise OSError("simulated live process termination failure")
+
+            def wait(self, timeout: float) -> int:
+                raise AssertionError("wait must not claim a still-live process exited")
+
+        fake_guardian = LiveGuardian()
+        arguments = argparse.Namespace(
+            command=self.sleeper_command(), port=port,
+            project=self.project.resolve(), working_directory=self.project.resolve(),
+            state_directory=self.state, trust_key_file=self.key_file,
+            startup_timeout=1, ready_url="", environment=[],
+        )
+
+        with mock.patch.object(processes, "listening_pids", return_value=[]), \
+             mock.patch.object(processes, "_spawn_guardian", return_value=fake_guardian), \
+             mock.patch.object(processes, "_running_popen_creation_identity", return_value=None), \
+             mock.patch.object(processes.time, "monotonic", side_effect=(0.0, 7.0)), \
+             self.assertRaisesRegex(
+                 processes.ProcessSecurityError,
+                 "guardian startup failed; cleanup was not confirmed",
+             ):
+            processes.start_run(arguments)
+        self.assertEqual(1, fake_guardian.terminate_calls)
+
+    def test_ready_identity_mismatch_terminates_the_spawned_guardian_handle(self) -> None:
+        port = self.free_port()
+        guardian_process = self.controlled_sleeper()
+        guardian_creation = processes.process_creation_identity(guardian_process.pid)
+        self.assertIsNotNone(guardian_creation)
+        state_path = self.state_path(port)
+        wrong_ready = self.signed_payload(port, guardian_process.pid, int(guardian_creation) + 1)
+
+        class RunningGuardian:
+            pid = guardian_process.pid
+
+            def __init__(self) -> None:
+                self.terminated = False
+                self.wait_timeout: float | None = None
+
+            def poll(self) -> None:
+                return None
+
+            def terminate(self) -> None:
+                self.terminated = True
+
+            def wait(self, timeout: float) -> int:
+                self.wait_timeout = timeout
+                return 1
+
+        fake_guardian = RunningGuardian()
+        arguments = argparse.Namespace(
+            command=self.sleeper_command(), port=port,
+            project=self.project.resolve(), working_directory=self.project.resolve(),
+            state_directory=self.state, trust_key_file=self.key_file,
+            startup_timeout=1, ready_url="", environment=[],
+        )
+
+        def spawn_with_ready_metadata(_arguments: argparse.Namespace) -> RunningGuardian:
+            processes.write_metadata(state_path, wrong_ready, self.key)
+            return fake_guardian
+
+        with mock.patch.object(processes, "listening_pids", return_value=[]), \
+             mock.patch.object(processes, "_spawn_guardian", side_effect=spawn_with_ready_metadata), \
+             mock.patch.object(
+                 processes, "_running_popen_creation_identity", return_value=int(guardian_creation)
+             ), \
+             self.assertRaisesRegex(
+                 processes.ProcessSecurityError,
+                 "startup metadata belongs to a different guardian",
+             ):
+            processes.start_run(arguments)
+        self.assertTrue(fake_guardian.terminated)
+        self.assertEqual(5, fake_guardian.wait_timeout)
+
     def test_binary_trust_key_preserves_newline_bytes(self):
         key_path = self.state / "binary-test.key"
         with mock.patch.object(processes.secrets, "token_bytes", return_value=b"\n" * 32):
