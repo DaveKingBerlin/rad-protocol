@@ -260,6 +260,196 @@ def _codex_version(distro: str, user: str, codex_abs: str) -> Optional[str]:
     return line or None
 
 
+# Phase 6.2: host-isolation verification primitives.
+#
+# The verifier reads /proc/self/mountinfo from inside the distro and classifies
+# every mount.  Only a small, version-tolerant set of WSL/system filesystems is
+# allowed; anything that can carry host data (drvfs, 9p, cifs, nfs, virtiofs,
+# ...) or an unknown filesystem type fails closed.  This is intentionally not a
+# check of "/mnt/c exists": an empty directory is not a mounted host drive, and
+# a missing /mnt/d is not proof of isolation.
+
+# Filesystem types that can expose the Windows host or other host resources.
+# This includes local host disk filesystems (ntfs/exfat/...) and network/host
+# filesystems (ceph/glusterfs/...): a mount of these types carries host data
+# and must never be visible inside the distro.
+_HOST_FILESYSTEMS = frozenset({
+    "drvfs", "cifs", "smb3", "nfs", "nfs4", "virtiofs", "fuse",
+    "fuseblk", "sshfs", "davfs", "overlayfs",
+    "ntfs", "ntfs3", "exfat", "vfat", "f2fs", "erofs", "iso9660", "udf",
+    "ceph", "glusterfs", "gfs2", "ocfs2", "lustre", "afs",
+})
+
+# 9p is used by WSL2 itself for read-only driver/utility mounts under
+# /usr/lib/wsl; only those exact targets are trusted.  A 9p mount elsewhere
+# is treated as a host mount (fail closed).
+_WSL_9P_TARGETS = frozenset({
+    "/usr/lib/wsl/drivers",
+    "/usr/lib/wsl/lib",
+})
+
+# Filesystem types that are legitimate WSL2/system mounts and carry no host
+# data.  Unknown types are treated as untrusted (fail closed).
+_ALLOWED_FILESYSTEMS = frozenset({
+    "ext2", "ext3", "ext4", "xfs", "btrfs", "squashfs",
+    "tmpfs", "ramfs", "devtmpfs", "devpts", "proc", "sysfs", "cgroup",
+    "cgroup2", "securityfs", "debugfs", "tracefs", "pstore", "efivarfs",
+    "mqueue", "hugetlbfs", "configfs", "fusectl", "binfmt_misc", "autofs",
+    "rootfs", "nsfs", "overlay", "selinuxfs", "bpf", "9p",
+})
+
+# Exact mount targets that the WSL2/system environment legitimately provides.
+_ALLOWED_MOUNT_TARGETS = frozenset({
+    "/", "/init", "/dev", "/dev/pts", "/dev/shm", "/dev/mqueue",
+    "/proc", "/proc/sys/fs/binfmt_misc", "/sys", "/sys/fs/cgroup",
+    "/run", "/run/lock", "/run/shm", "/run/user", "/tmp/.X11-unix",
+    "/mnt/wsl", "/mnt/wslg", "/mnt/wslg/distro", "/mnt/wslg/doc",
+    "/mnt/wslg/versions.txt", "/usr/lib/wsl/drivers", "/usr/lib/wsl/lib",
+    "/usr/lib/modules", "/usr/src/linux-headers",
+})
+
+
+def _parse_mountinfo(text: str) -> List[Mapping[str, object]]:
+    """Parse ``/proc/self/mountinfo`` into structured mount records.
+
+    Format: ``mount_id parent_id major:minor root mount_point options ... - fstype source superoptions``
+    Unparseable lines are skipped (they cannot be trusted as mounts).
+    """
+    mounts: List[Mapping[str, object]] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            separator = line.index(" - ")
+        except ValueError:
+            continue
+        left = line[:separator].split()
+        right = line[separator + 3:].split()
+        if len(left) < 6 or len(right) < 3:
+            continue
+        mounts.append({
+            "mount_id": left[0],
+            "parent_id": left[1],
+            "root": left[3],
+            "mount_point": left[4],
+            "options": left[5],
+            "fstype": right[0],
+            "source": right[1],
+            "superoptions": right[2] if len(right) > 2 else "",
+        })
+    return mounts
+
+
+def _classify_mount(mount: Mapping[str, object], distro: str) -> str:
+    """Classify one mount as ``allowed``, ``host`` or ``unknown``.
+
+    ``host`` = carries host/other-distro data and must never be visible.
+    ``unknown`` = not confidently classifiable; treated as untrusted.
+    """
+    fstype = str(mount["fstype"]).lower()
+    target = str(mount["mount_point"])
+    if fstype in _HOST_FILESYSTEMS:
+        return "host"
+    if fstype == "9p":
+        # Only the exact read-only WSL driver/utility mounts are trusted.
+        return "allowed" if target in _WSL_9P_TARGETS else "host"
+    if fstype in _ALLOWED_FILESYSTEMS:
+        # A mount under /mnt that is not a known WSL system mount is suspicious.
+        if target == "/mnt" or target.startswith("/mnt/") and target not in _ALLOWED_MOUNT_TARGETS:
+            return "unknown"
+        if target in _ALLOWED_MOUNT_TARGETS or target.startswith(("/usr/lib/modules",
+                                                                  "/usr/src/linux-headers",
+                                                                  "/usr/lib/wsl/")):
+            return "allowed"
+        return "unknown"
+    return "unknown"
+
+
+def mount_inventory(distro: str, user: str,
+                    timeout: float = 60) -> List[Mapping[str, object]]:
+    """Read and parse the live mount inventory from inside the distro."""
+    result = _wsl("--", "sh", "-c", "cat /proc/self/mountinfo",
+                  distro=distro, user=user, timeout=timeout)
+    if result.returncode != 0:
+        raise WslBackendError("cannot read /proc/self/mountinfo")
+    if not result.stdout.strip():
+        raise WslBackendError("mountinfo is empty; refusing to trust")
+    return _parse_mountinfo(result.stdout)
+
+
+def verify_mount_isolation(distro: str = DEFAULT_DISTRO,
+                           user: str = DEFAULT_USER,
+                           timeout: float = 60) -> Mapping[str, object]:
+    """Fail-closed classification of every visible mount.
+
+    Returns ``{"ok": bool, "checks": [...], "mounts": [...]}``.  Any ``host``
+    mount or any ``unknown`` mount fails the check; a missing/unreadable
+    mountinfo also fails closed.
+    """
+    checks: list[dict[str, object]] = []
+    try:
+        mounts = mount_inventory(distro, user, timeout)
+    except WslBackendError as error:
+        return {"ok": False,
+                "checks": [{"check": "mountinfo-readable", "ok": False,
+                            "detail": str(error)}],
+                "mounts": []}
+
+    host_mounts: list[str] = []
+    unknown_mounts: list[str] = []
+    for mount in mounts:
+        classification = _classify_mount(mount, distro)
+        if classification == "host":
+            host_mounts.append("%s (%s)" % (mount["mount_point"], mount["fstype"]))
+        elif classification == "unknown":
+            unknown_mounts.append("%s (%s)" % (mount["mount_point"], mount["fstype"]))
+
+    checks.append({"check": "no-host-mounts", "ok": not host_mounts,
+                   "detail": "host mounts: %s" % (host_mounts or "none")})
+    checks.append({"check": "no-unknown-mounts", "ok": not unknown_mounts,
+                   "detail": "unknown mounts: %s" % (unknown_mounts or "none")})
+    return {"ok": not host_mounts and not unknown_mounts,
+            "checks": checks, "mounts": mounts}
+
+
+def verify_privileges(distro: str = DEFAULT_DISTRO, user: str = DEFAULT_USER,
+                      timeout: float = 60) -> Mapping[str, object]:
+    """Fail-closed check of the effective privilege state inside the distro.
+
+    Verifies that the backend user is non-root and holds no effective or
+    permitted capabilities.  ``CapBnd`` may contain capabilities (the WSL
+    bounding set is inherited from the host); only effective/permitted/ambient
+    sets grant authority to the running process.
+    """
+    script = (
+        "id -u; "
+        "grep -E '^Cap(Eff|Prm|Amb):' /proc/self/status; "
+        "grep -E '^NoNewPrivs:' /proc/self/status"
+    )
+    result = _wsl("--", "sh", "-c", script, distro=distro, user=user,
+                  timeout=timeout)
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    uid_ok = bool(lines) and lines[0].isdigit() and lines[0] != "0"
+    cap_eff = next((line.split(":", 1)[1].strip() for line in lines
+                    if line.startswith("CapEff:")), None)
+    cap_prm = next((line.split(":", 1)[1].strip() for line in lines
+                    if line.startswith("CapPrm:")), None)
+    cap_amb = next((line.split(":", 1)[1].strip() for line in lines
+                    if line.startswith("CapAmb:")), None)
+    caps_clear = all(value == "0000000000000000"
+                     for value in (cap_eff, cap_prm, cap_amb) if value is not None)
+    return {
+        "ok": uid_ok and caps_clear,
+        "checks": [
+            {"check": "non-root-user", "ok": uid_ok, "detail": "uid=%s" % (lines[0] if lines else "?")},
+            {"check": "no-effective-caps", "ok": caps_clear,
+             "detail": "CapEff=%s CapPrm=%s CapAmb=%s" % (cap_eff, cap_prm, cap_amb)},
+        ],
+        "cap_eff": cap_eff, "cap_prm": cap_prm, "cap_amb": cap_amb,
+    }
+
+
 def verify_wsl_backend(
     *,
     distro: str = DEFAULT_DISTRO,
@@ -306,6 +496,18 @@ def verify_wsl_backend(
                    "ls /mnt/c/Windows >/dev/null 2>&1 && echo c-visible || echo c-hidden",
                    distro=distro, user=user)
     record("host-drive-hidden", "c-visible" not in mounted.stdout, mounted.stdout.strip())
+
+    # Phase 6.2: full mount classification (fail-closed) replaces the narrow
+    # "/mnt/c/Windows exists" check.  An empty /mnt/c directory is not a mounted
+    # host drive, and a missing /mnt/d is not proof of isolation.
+    isolation = verify_mount_isolation(distro, user)
+    for check in isolation["checks"]:
+        record(check["check"], check["ok"], str(check["detail"]))
+
+    # Phase 6.2: effective privilege state of the backend user.
+    privileges = verify_privileges(distro, user)
+    for check in privileges["checks"]:
+        record(check["check"], check["ok"], str(check["detail"]))
 
     if not codex_path or not codex_path.startswith("/"):
         record("codex-pin", False, "codex_path must be absolute")

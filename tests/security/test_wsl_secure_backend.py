@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from security.rad_security.launcher import SecureModeUnavailable, prepare_secure_launch
 from security.rad_security.baseline import calculate_release_digest
@@ -29,17 +30,22 @@ from security.rad_security.wsl_backend import (
     DEFAULT_DISTRO,
     DEFAULT_USER,
     WslBackendError,
+    _classify_mount,
     _codex_version,
     _hash_only_codex,
+    _parse_mountinfo,
     _wsl_root,
     _wsl_user,
     clean_remote,
     distro_exists,
     guard_control_plane_wsl,
     launch_secure_run,
+    mount_inventory,
     stage_project,
     run_sandboxed,
     unguard_control_plane_wsl,
+    verify_mount_isolation,
+    verify_privileges,
     verify_wsl_backend,
 )
 
@@ -101,6 +107,229 @@ def _build_fixture(directory):
         "sys.exit(subprocess.call([sys.executable, '-B', script] + sys.argv[2:]))\n",
         encoding="utf-8")
     return root
+
+
+# -- Phase 6.2: host-isolation unit tests (synthetic mount inventories) -------
+
+
+def _mount_line(mount_id: str, target: str, fstype: str, source: str = "none",
+                options: str = "rw,relatime") -> str:
+    """Build a minimal, valid ``/proc/self/mountinfo`` line."""
+    return ("%s 1 0:1 / %s %s - %s %s %s"
+            % (mount_id, target, options, fstype, source, options))
+
+
+class MountIsolationUnitTests(unittest.TestCase):
+    """Pure unit tests for the fail-closed mount classifier.
+
+    These do not require the WSL backend: they validate the classification of
+    synthetic mount inventories, including legitimate WSL system mounts and
+    host mounts that must be rejected.
+    """
+
+    def _classify(self, line: str) -> str:
+        mounts = _parse_mountinfo(line)
+        self.assertEqual(1, len(mounts), mounts)
+        return _classify_mount(mounts[0], DEFAULT_DISTRO)
+
+    def test_mnt_c_empty_directory_is_not_a_host_mount(self):
+        # /mnt/c as a plain directory on the rootfs is NOT a mount entry at all.
+        # The absence of a /mnt/c mount entry is exactly the property that proves
+        # it is not a mounted host drive.
+        inventory = "\n".join([
+            _mount_line("1", "/", "ext4", "/dev/sdd"),
+            _mount_line("2", "/mnt/wsl", "tmpfs", "none"),
+        ])
+        mounts = _parse_mountinfo(inventory)
+        self.assertNotIn("/mnt/c", [m["mount_point"] for m in mounts])
+        for mount in mounts:
+            self.assertNotEqual("host", _classify_mount(mount, DEFAULT_DISTRO))
+
+    def test_missing_mnt_d_is_not_proof_of_isolation(self):
+        # The classifier only sees mounts; /mnt/d absence is not a mount entry.
+        # A synthetic inventory without /mnt/d must still pass if every mount is
+        # legitimate, but this test pins that the classifier never invents a
+        # host mount for a path that is not mounted.
+        inventory = "\n".join([
+            _mount_line("1", "/", "ext4", "/dev/sdd"),
+            _mount_line("2", "/mnt/wsl", "tmpfs"),
+        ])
+        mounts = _parse_mountinfo(inventory)
+        self.assertEqual(2, len(mounts))
+        for mount in mounts:
+            self.assertNotEqual("host", _classify_mount(mount, DEFAULT_DISTRO))
+
+    def test_unauthorized_windows_drvfs_mount_detected(self):
+        line = _mount_line("200", "/mnt/c", "drvfs", "C:")
+        self.assertEqual("host", self._classify(line))
+
+    def test_windows_mount_outside_standard_path_detected(self):
+        line = _mount_line("201", "/opt/windows", "drvfs", "D:")
+        self.assertEqual("host", self._classify(line))
+
+    def test_unauthorized_9p_mount_is_host(self):
+        line = _mount_line("202", "/data", "9p", "hostshare")
+        self.assertEqual("host", self._classify(line))
+
+    def test_authorized_wsl_9p_driver_mount_allowed(self):
+        line = _mount_line("203", "/usr/lib/wsl/drivers", "9p", "drivers",
+                           "ro,nosuid,nodev,noatime")
+        self.assertEqual("allowed", self._classify(line))
+
+    def test_legitimate_wsl_system_mounts_allowed(self):
+        for target, fstype, source in (
+                ("/proc", "proc", "proc"),
+                ("/sys", "sysfs", "sysfs"),
+                ("/dev", "devtmpfs", "none"),
+                ("/run", "tmpfs", "none"),
+                ("/mnt/wsl", "tmpfs", "none"),
+                ("/", "ext4", "/dev/sdd"),
+        ):
+            with self.subTest(target=target, fstype=fstype):
+                line = _mount_line("300", target, fstype, source)
+                self.assertEqual("allowed", self._classify(line), line)
+
+    def test_unknown_mount_is_untrusted(self):
+        line = _mount_line("400", "/opt/data", "acme", "acme0")
+        self.assertEqual("unknown", self._classify(line))
+
+    def test_unknown_mount_under_mnt_is_untrusted(self):
+        line = _mount_line("401", "/mnt/data", "tmpfs", "none")
+        self.assertEqual("unknown", self._classify(line))
+
+    def test_malformed_mountinfo_is_skipped_not_trusted(self):
+        self.assertEqual([], _parse_mountinfo("garbage line without separator"))
+
+    def test_host_local_disk_filesystems_detected(self):
+        # ntfs/exfat/vfat and network filesystems must be recognised as host
+        # mounts, not merely as "unknown".
+        for fstype in ("ntfs", "ntfs3", "exfat", "vfat", "ceph", "glusterfs",
+                       "lustre", "afs"):
+            with self.subTest(fstype=fstype):
+                line = _mount_line("500", "/mnt/host", fstype, "src")
+                self.assertEqual("host", self._classify(line), line)
+
+    def test_verify_mount_isolation_rejects_drvfs_inventory(self):
+        # Inject a synthetic inventory with a drvfs mount and confirm the
+        # fail-closed decision, without touching the real distro.
+        from security.rad_security import wsl_backend
+
+        synthetic = "\n".join([
+            _mount_line("1", "/", "ext4", "/dev/sdd"),
+            _mount_line("2", "/mnt/c", "drvfs", "C:"),
+        ])
+
+        class _Result:
+            returncode = 0
+            stdout = synthetic
+
+        with mock.patch.object(wsl_backend, "_wsl", return_value=_Result()):
+            report = verify_mount_isolation(DEFAULT_DISTRO, DEFAULT_USER)
+        self.assertFalse(report["ok"])
+        self.assertFalse(any(c["check"] == "no-host-mounts" and c["ok"]
+                             for c in report["checks"]))
+
+    def test_verify_mount_isolation_rejects_unknown_inventory(self):
+        from security.rad_security import wsl_backend
+
+        synthetic = "\n".join([
+            _mount_line("1", "/", "ext4", "/dev/sdd"),
+            _mount_line("2", "/opt/data", "acme", "acme0"),
+        ])
+
+        class _Result:
+            returncode = 0
+            stdout = synthetic
+
+        with mock.patch.object(wsl_backend, "_wsl", return_value=_Result()):
+            report = verify_mount_isolation(DEFAULT_DISTRO, DEFAULT_USER)
+        self.assertFalse(report["ok"])
+        self.assertFalse(any(c["check"] == "no-unknown-mounts" and c["ok"]
+                             for c in report["checks"]))
+
+    def test_verify_mount_isolation_accepts_clean_inventory(self):
+        from security.rad_security import wsl_backend
+
+        synthetic = "\n".join([
+            _mount_line("1", "/", "ext4", "/dev/sdd"),
+            _mount_line("2", "/mnt/wsl", "tmpfs", "none"),
+            _mount_line("3", "/usr/lib/wsl/drivers", "9p", "drivers"),
+        ])
+
+        class _Result:
+            returncode = 0
+            stdout = synthetic
+
+        with mock.patch.object(wsl_backend, "_wsl", return_value=_Result()):
+            report = verify_mount_isolation(DEFAULT_DISTRO, DEFAULT_USER)
+        self.assertTrue(report["ok"], report["checks"])
+
+    def test_verify_mount_isolation_fails_closed_on_unreadable_mountinfo(self):
+        from security.rad_security import wsl_backend
+
+        class _Result:
+            returncode = 1
+            stdout = ""
+
+        with mock.patch.object(wsl_backend, "_wsl", return_value=_Result()):
+            report = verify_mount_isolation(DEFAULT_DISTRO, DEFAULT_USER)
+        self.assertFalse(report["ok"])
+        self.assertEqual([], report["mounts"])
+
+    def test_verify_mount_isolation_fails_closed_on_empty_inventory(self):
+        # A successful command that returns no readable mounts must fail closed,
+        # not vacuously pass.
+        from security.rad_security import wsl_backend
+
+        class _Result:
+            returncode = 0
+            stdout = ""
+
+        with mock.patch.object(wsl_backend, "_wsl", return_value=_Result()):
+            report = verify_mount_isolation(DEFAULT_DISTRO, DEFAULT_USER)
+        self.assertFalse(report["ok"])
+        self.assertEqual([], report["mounts"])
+
+    def test_verify_privileges_rejects_root(self):
+        from security.rad_security import wsl_backend
+
+        payload = "0\nCapEff:\t0000000000000000\nCapPrm:\t0000000000000000\nCapAmb:\t0000000000000000\n"
+
+        class _Result:
+            returncode = 0
+            stdout = payload
+
+        with mock.patch.object(wsl_backend, "_wsl", return_value=_Result()):
+            report = verify_privileges(DEFAULT_DISTRO, DEFAULT_USER)
+        self.assertFalse(report["ok"])
+
+    def test_verify_privileges_rejects_effective_caps(self):
+        from security.rad_security import wsl_backend
+
+        payload = ("1000\nCapEff:\t0000000000000001\nCapPrm:\t0000000000000000\n"
+                   "CapAmb:\t0000000000000000\n")
+
+        class _Result:
+            returncode = 0
+            stdout = payload
+
+        with mock.patch.object(wsl_backend, "_wsl", return_value=_Result()):
+            report = verify_privileges(DEFAULT_DISTRO, DEFAULT_USER)
+        self.assertFalse(report["ok"])
+
+    def test_verify_privileges_accepts_clean_state(self):
+        from security.rad_security import wsl_backend
+
+        payload = ("1000\nCapEff:\t0000000000000000\nCapPrm:\t0000000000000000\n"
+                   "CapAmb:\t0000000000000000\n")
+
+        class _Result:
+            returncode = 0
+            stdout = payload
+
+        with mock.patch.object(wsl_backend, "_wsl", return_value=_Result()):
+            report = verify_privileges(DEFAULT_DISTRO, DEFAULT_USER)
+        self.assertTrue(report["ok"], report["checks"])
 
 
 @unittest.skipUnless(_has_wsl_backend(),
@@ -357,6 +586,68 @@ class WslSecureBackendTests(unittest.TestCase):
                 clean_remote(remote, DEFAULT_DISTRO, DEFAULT_USER)
 
     # -- filesystem / network / control-plane baseline (Phase 2D) -----------
+
+    # -- Phase 6.2: host isolation (real distro integration) --------------
+
+    def test_mount_isolation_real_inventory_is_clean(self):
+        report = verify_mount_isolation(DEFAULT_DISTRO, DEFAULT_USER)
+        self.assertTrue(report["ok"], report["checks"])
+        # The real inventory must contain no host and no unknown mounts.
+        self.assertTrue(all(c["ok"] for c in report["checks"]))
+
+    def test_privileges_real_backend_user_is_unprivileged(self):
+        report = verify_privileges(DEFAULT_DISTRO, DEFAULT_USER)
+        self.assertTrue(report["ok"], report["checks"])
+        self.assertEqual("0000000000000000", report["cap_eff"])
+        self.assertEqual("0000000000000000", report["cap_prm"])
+        self.assertEqual("0000000000000000", report["cap_amb"])
+
+    def test_agent_and_child_privilege_state(self):
+        # The agent (Codex sandbox) and a controlled child must both be
+        # unprivileged with no effective capabilities.
+        result = self.sandbox(
+            "id -u; grep -E '^Cap(Eff|Prm|Amb):' /proc/self/status; "
+            "python3 -c 'import os;print(os.getuid())'")
+        self.assertIn("1000", result.stdout)
+        self.assertIn("CapEff:\t0000000000000000", result.stdout)
+        self.assertIn("CapPrm:\t0000000000000000", result.stdout)
+        self.assertIn("CapAmb:\t0000000000000000", result.stdout)
+
+    def test_agent_cannot_mount(self):
+        # The agent must not be able to create new mounts (no CAP_SYS_ADMIN).
+        self.assert_sandbox_line(
+            "mkdir -p /tmp/rad-mnt-probe 2>/dev/null && "
+            "mount -t tmpfs none /tmp/rad-mnt-probe 2>/dev/null && echo MOUNT-BAD || echo MOUNT-OK",
+            "MOUNT-OK")
+
+    def test_no_new_privs_blocks_setuid(self):
+        # NoNewPrivs=1 must prevent setuid binaries from elevating privileges.
+        self.assert_sandbox_line(
+            "grep -E '^NoNewPrivs:' /proc/self/status | grep -q 1 && echo NNP-OK || echo NNP-BAD",
+            "NNP-OK")
+
+    def test_agent_cannot_read_other_distro_or_host_paths(self):
+        self.assert_sandbox_line(
+            "(test -e /mnt/c/Windows && echo WIN-BAD) || echo WIN-OK", "WIN-OK")
+        self.assert_sandbox_line(
+            "(test -e /mnt/d && echo D-BAD) || echo D-OK", "D-OK")
+        self.assert_sandbox_line(
+            "(ls //wsl$/ >/dev/null 2>&1 && echo WSLMNT-BAD) || echo WSLMNT-OK",
+            "WSLMNT-OK")
+
+    def test_original_project_unchanged_by_sandbox(self):
+        # The sandbox must not modify the source Windows project.
+        marker = self.local / "unchanged.txt"
+        marker.write_text("sentinel", encoding="utf-8")
+        result = self.sandbox("echo x >> unchanged.txt 2>/dev/null; echo done")
+        self.assertIn("done", result.stdout)
+        # The staged copy may be modified, but the original must be intact.
+        self.assertEqual("sentinel", marker.read_text(encoding="utf-8"))
+
+    def test_product_files_still_writable_in_sandbox(self):
+        # Legitimate product edits inside the staged workspace still work.
+        self.assert_sandbox_line(
+            "echo w >> src/app.txt && echo PROD-OK || echo PROD-BAD", "PROD-OK")
 
     def test_fixture_has_no_windows_drive_access(self):
         self.assert_sandbox_line(
