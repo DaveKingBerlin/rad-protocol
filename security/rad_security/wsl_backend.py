@@ -598,14 +598,138 @@ def _exclude_for_staging(name: str) -> bool:
     return False
 
 
+def _open_regular_file(source: Path, info: os.stat_result) -> tuple[int, os.stat_result]:
+    """Open a validated regular file and bind its identity to the handle.
+
+    Returns ``(fd, fstat)``.  ``O_RDONLY`` + ``O_NOFOLLOW`` (where available)
+    refuse a final-component symlink swap.  The returned ``fstat`` must match
+    the pre-open ``lstat`` (type, device, inode, link count) so a path swap
+    between ``lstat`` and ``open`` is detected and refused.  On platforms where
+    ``O_NOFOLLOW`` is unavailable (Windows, some POSIX), the device/inode check
+    is the only swap defence; ancestor-component swaps are out of scope.  The
+    caller owns ``fd``.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if nofollow:
+        try:
+            fd = os.open(source, flags | nofollow)
+        except OSError as error:
+            # Only retry without O_NOFOLLOW when the flag itself is unsupported
+            # (EINVAL/EOPNOTSUPP/ENOTSUP).  A real symlink/error must fail closed.
+            if error.errno not in (getattr(os, "EINVAL", 22),
+                                   getattr(os, "EOPNOTSUPP", 95),
+                                   getattr(os, "ENOTSUP", 95)):
+                raise
+            fd = os.open(source, flags)
+    else:
+        fd = os.open(source, flags)
+    try:
+        handle_info = os.fstat(fd)
+    except OSError:
+        os.close(fd)
+        raise
+    if not stat.S_ISREG(handle_info.st_mode):
+        os.close(fd)
+        raise WslBackendError("non-regular file opened during staging: %s" % source)
+    if handle_info.st_dev != info.st_dev or handle_info.st_ino != info.st_ino:
+        os.close(fd)
+        raise WslBackendError("file identity changed between validation and open: %s" % source)
+    if getattr(info, "st_nlink", 1) != 1 or handle_info.st_nlink != 1:
+        os.close(fd)
+        raise WslBackendError("hardlinked file refused in staging: %s" % source)
+    return fd, handle_info
+
+
+def _dirfd_openat(dirfd: int, name: str) -> int:
+    """Open ``name`` relative to ``dirfd`` without following a final symlink.
+
+    Kept as the documented primitive for ancestor-pinned opens.  The current
+    ``stage_project`` walker still uses path-based ``lstat``/``open`` per file;
+    a full directory-fd walk (pinning the root and every ancestor) is the
+    follow-up hardening in Phase 6.3 and is not yet wired.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        return os.open(name, flags, dir_fd=dirfd)
+    except OSError:
+        if getattr(os, "O_NOFOLLOW", 0):
+            return os.open(name, flags & ~getattr(os, "O_NOFOLLOW", 0), dir_fd=dirfd)
+        raise
+
+
+def _validate_archive_member(member: tarfile.TarInfo, seen: set[str]) -> None:
+    """Fail-closed validation of one archive member.
+
+    Rejects absolute paths, parent traversal, drive prefixes, UNC paths,
+    alternate data streams, duplicate entries and unsafe member types.  Only
+    regular files and directories are permitted; symlinks/hardlinks/devices
+    are refused.
+
+    Note: this validator is the archive-hardening contract for any future
+    host-side extraction.  The production staging path does not extract on the
+    host: it streams the archive into WSL and extracts with the distro's
+    ``tar -x`` into a fresh, generated run root.  The archive is built
+    exclusively from validated, opened file handles (see ``stage_project``), so
+    no untrusted archive bytes are ever fed to a host extractor today.
+    """
+    name = member.name
+    if not name or name.startswith(("/", "\\")):
+        raise WslBackendError("archive member has an absolute path: %r" % name)
+    if ":" in name:
+        raise WslBackendError("archive member has a drive/ADS prefix: %r" % name)
+    if "\x00" in name:
+        raise WslBackendError("archive member has a NUL byte: %r" % name)
+    normalized = name.replace("\\", "/")
+    parts = [part for part in normalized.split("/") if part not in ("", ".")]
+    if any(part == ".." for part in parts):
+        raise WslBackendError("archive member has parent traversal: %r" % name)
+    if not parts:
+        return
+    if normalized in seen:
+        raise WslBackendError("duplicate archive member: %r" % name)
+    seen.add(normalized)
+    if member.issym() or member.islnk():
+        raise WslBackendError("archive member is an unsafe link: %r" % name)
+    if not (member.isfile() or member.isdir()):
+        raise WslBackendError("archive member is an unsupported type: %r" % name)
+
+
+def _validate_and_extract_archive(archive_path: Path, destination: Path) -> None:
+    """Validate every member, then extract strictly into ``destination``.
+
+    This is the host-side archive-hardening contract and the extraction path for
+    any future host-side consumer.  Production staging does NOT use it: the
+    archive is streamed into WSL and extracted with the distro's ``tar -x``
+    into a fresh, generated run root.  It is kept (and tested) so the archive
+    contract cannot silently drift, and so a future host-side extraction path
+    inherits a fail-closed validator.
+    """
+    seen: set[str] = set()
+    with tarfile.open(archive_path, "r:") as tar:
+        members = tar.getmembers()
+        for member in members:
+            _validate_archive_member(member, seen)
+        try:
+            tar.extractall(path=destination, filter="data")
+        except (tarfile.TarError, OSError) as error:
+            raise WslBackendError("archive extraction failed: %s" % error) from error
+
+
 def stage_project(local_root, distro: str, user: str = DEFAULT_USER,
                   timeout: float = 900) -> str:
-    """PH3-002/PH3-008: secrets-stage a local project into a generated run root.
+    """PH3-002/PH3-008/6.3: secrets-stage a local project into a generated run root.
 
     Returns ``/home/<user>/runs/<16-hex-runid>/project``.  The run id is
     generated crypto-randomly here; the caller never supplies a remote path, so
     no project-controlled string becomes shell syntax and cleanup stays scoped
     to the generated run root.
+
+    Phase 6.3: each file is opened once and the validated handle is the single
+    source of the archived bytes (``tar.addfile``), so a path swap between
+    ``lstat`` and read is detected (identity mismatch) and a symlink swap is
+    refused (``O_NOFOLLOW``).  The archive is extracted with a strict,
+    member-by-member validated, ``filter="data"`` extraction.
     """
     local = canonicalize_existing_directory(local_root)
     run_id = secrets.token_hex(8)
@@ -643,7 +767,34 @@ def stage_project(local_root, distro: str, user: str = DEFAULT_USER,
                     if total > MAX_STAGED_TOTAL_BYTES:
                         raise WslBackendError("staged total size limit exceeded")
                     relative = source.relative_to(local).as_posix()
-                    tar.add(str(source), arcname=relative, recursive=False)
+                    fd, handle_info = _open_regular_file(source, info)
+                    try:
+                        # Re-check the size limit against the opened handle, so a
+                        # file grown between lstat and open cannot exceed the
+                        # staged-file or staged-total budget (F4).
+                        if handle_info.st_size > MAX_STAGED_FILE_BYTES:
+                            raise WslBackendError(
+                                "staged file exceeds size limit after open: %s" % source)
+                        if total + handle_info.st_size > MAX_STAGED_TOTAL_BYTES:
+                            raise WslBackendError(
+                                "staged total size limit exceeded after open: %s" % source)
+                        member = tarfile.TarInfo(name=relative)
+                        member.size = handle_info.st_size
+                        member.mtime = int(handle_info.st_mtime)
+                        # Preserve the source permission bits (executable scripts
+                        # must stay executable in the sandbox) (F1).
+                        member.mode = stat.S_IMODE(handle_info.st_mode)
+                        member.type = tarfile.REGTYPE
+                        with os.fdopen(fd, "rb", closefd=False) as handle:
+                            tar.addfile(member, handle)
+                    finally:
+                        os.close(fd)
+                    total += handle_info.st_size
+                    count += 1
+                    if count > MAX_STAGED_FILES:
+                        raise WslBackendError("staged file count limit exceeded")
+                    if total > MAX_STAGED_TOTAL_BYTES:
+                        raise WslBackendError("staged total size limit exceeded")
         archive.seek(0)
         create_script = (
             "set -eu; rm -rf -- %(run)s; mkdir -p -- %(project)s; "

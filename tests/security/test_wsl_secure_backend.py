@@ -332,6 +332,142 @@ class MountIsolationUnitTests(unittest.TestCase):
         self.assertTrue(report["ok"], report["checks"])
 
 
+# -- Phase 6.3: secure staging unit tests ---------------------------------------
+
+
+class SecureStagingUnitTests(unittest.TestCase):
+    """Pure unit tests for race-safe staging and archive validation.
+
+    These do not require the WSL backend: they validate object binding, archive
+    member validation and extraction safety on synthetic files/archives.
+    """
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="rad-staging-unit-")
+        self.base = Path(self.temporary.name)
+        self.project = self.base / "project"
+        (self.project / "src").mkdir(parents=True)
+        (self.project / "src" / "app.txt").write_text("product\n", encoding="utf-8")
+        (self.project / "AGENTS.md").write_text("bootstrap\n", encoding="utf-8")
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def test_regular_file_is_archived_with_handle_bytes(self):
+        from security.rad_security import wsl_backend
+
+        source = self.project / "src" / "app.txt"
+        source.write_bytes(b"product\n")
+        info = source.lstat()
+        fd, handle_info = wsl_backend._open_regular_file(source, info)
+        try:
+            self.assertEqual(info.st_dev, handle_info.st_dev)
+            self.assertEqual(info.st_ino, handle_info.st_ino)
+            with os.fdopen(os.dup(fd), "rb") as handle:
+                self.assertEqual(b"product\n", handle.read())
+        finally:
+            os.close(fd)
+
+    def test_file_swapped_between_lstat_and_open_is_refused(self):
+        from security.rad_security import wsl_backend
+
+        source = self.project / "src" / "app.txt"
+        info = source.lstat()
+        # Replace the file with a different inode between validation and open.
+        os.unlink(source)
+        source.write_text("swapped\n", encoding="utf-8")
+        with self.assertRaises(wsl_backend.WslBackendError):
+            wsl_backend._open_regular_file(source, info)
+
+    def test_symlink_is_refused(self):
+        from security.rad_security import wsl_backend
+
+        target = self.project / "src" / "target.txt"
+        target.write_text("t\n", encoding="utf-8")
+        link = self.project / "src" / "link.txt"
+        try:
+            os.symlink(target, link)
+        except OSError:
+            self.skipTest("host does not support symlink creation")
+        info = link.lstat()
+        with self.assertRaises(wsl_backend.WslBackendError):
+            wsl_backend._open_regular_file(link, info)
+
+    def test_archive_rejects_absolute_path(self):
+        from security.rad_security import wsl_backend
+        import tarfile
+
+        archive_path = self.base / "abs.tar"
+        with tarfile.open(archive_path, "w") as tar:
+            member = tarfile.TarInfo(name="/etc/passwd")
+            member.size = 0
+            tar.addfile(member)
+        with self.assertRaises(wsl_backend.WslBackendError):
+            wsl_backend._validate_and_extract_archive(archive_path, self.base / "out")
+
+    def test_archive_rejects_parent_traversal(self):
+        from security.rad_security import wsl_backend
+        import tarfile
+
+        archive_path = self.base / "trav.tar"
+        with tarfile.open(archive_path, "w") as tar:
+            member = tarfile.TarInfo(name="../escape.txt")
+            member.size = 0
+            tar.addfile(member)
+        with self.assertRaises(wsl_backend.WslBackendError):
+            wsl_backend._validate_and_extract_archive(archive_path, self.base / "out")
+
+    def test_archive_rejects_symlink_member(self):
+        from security.rad_security import wsl_backend
+        import tarfile
+
+        archive_path = self.base / "sym.tar"
+        with tarfile.open(archive_path, "w") as tar:
+            member = tarfile.TarInfo(name="link")
+            member.type = tarfile.SYMTYPE
+            member.linkname = "/etc/passwd"
+            tar.addfile(member)
+        with self.assertRaises(wsl_backend.WslBackendError):
+            wsl_backend._validate_and_extract_archive(archive_path, self.base / "out")
+
+    def test_archive_rejects_duplicate_member(self):
+        from security.rad_security import wsl_backend
+        import tarfile
+
+        archive_path = self.base / "dup.tar"
+        with tarfile.open(archive_path, "w") as tar:
+            for _ in range(2):
+                member = tarfile.TarInfo(name="same.txt")
+                member.size = 0
+                tar.addfile(member)
+        with self.assertRaises(wsl_backend.WslBackendError):
+            wsl_backend._validate_and_extract_archive(archive_path, self.base / "out")
+
+    def test_valid_archive_extracts_into_target_only(self):
+        from security.rad_security import wsl_backend
+        import tarfile
+
+        archive_path = self.base / "ok.tar"
+        with tarfile.open(archive_path, "w") as tar:
+            member = tarfile.TarInfo(name="data/file.txt")
+            member.size = 3
+            import io
+            tar.addfile(member, io.BytesIO(b"abc"))
+        out = self.base / "out"
+        out.mkdir()
+        wsl_backend._validate_and_extract_archive(archive_path, out)
+        self.assertEqual(b"abc", (out / "data" / "file.txt").read_bytes())
+
+    def test_excluded_secret_names_are_filtered(self):
+        from security.rad_security import wsl_backend
+
+        for name in (".env", "id_rsa", "secret.pem", ".npmrc"):
+            with self.subTest(name=name):
+                self.assertTrue(wsl_backend._exclude_for_staging(name))
+        self.assertFalse(wsl_backend._exclude_for_staging("src/app.py"))
+        self.assertFalse(wsl_backend._exclude_for_staging("README.md"))
+
+
 @unittest.skipUnless(_has_wsl_backend(),
                      "RAD-Secure-Test WSL2 backend is not available on this host")
 class WslSecureBackendTests(unittest.TestCase):
